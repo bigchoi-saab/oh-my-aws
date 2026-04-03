@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"ls C:\\\\dev\\\\oh-my-aws/\",\"description\":\"List project root directory\"}",
+  "error": "Exit code 2\nls: cannot access 'C:devoh-my-aws/': No such file or directory",
+  "timestamp": "2026-04-03T14:15:18.052Z",
+  "retry_count": 1
+}

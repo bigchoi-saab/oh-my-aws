@@ -1,0 +1,91 @@
+{
+  "name": "aws-incident-responder",
+  "description": "AWS 인프라 인시던트 감지, 분석, 대응 전문 에이전트. Observe-Reason-Act-Verify-Audit 파이프라인으로 장애 초동 조치를 수행합니다.",
+  "model": "claude-sonnet-4",
+
+  "mcpServers": {
+    "aws-core": {
+      "command": "uvx",
+      "args": ["awslabs.core-mcp-server@latest"],
+      "env": {
+        "AWS_PROFILE": "${AWS_PROFILE}",
+        "AWS_REGION": "${AWS_REGION}",
+        "FASTMCP_LOG_LEVEL": "ERROR"
+      },
+      "timeout": 120000,
+      "autoApprove": [
+        "describe_instances",
+        "list_buckets",
+        "get_metric_data",
+        "describe_alarms"
+      ],
+      "disabledTools": [
+        "terminate_instances",
+        "delete_stack",
+        "delete_bucket"
+      ]
+    },
+    "aws-docs": {
+      "command": "uvx",
+      "args": ["awslabs.aws-documentation-mcp-server@latest"],
+      "env": {
+        "FASTMCP_LOG_LEVEL": "ERROR"
+      },
+      "autoApprove": [
+        "search_documentation",
+        "read_documentation"
+      ]
+    }
+  },
+
+  "includeMcpJson": true,
+
+  "tools": [
+    "read",
+    "write",
+    "shell",
+    "@aws-core",
+    "@aws-docs",
+    "@aws-ops-tools"
+  ],
+
+  "allowedTools": [
+    "read",
+    "@aws-core/describe_*",
+    "@aws-core/list_*",
+    "@aws-core/get_*",
+    "@aws-docs/*",
+    "@aws-ops-tools/query_cloudwatch_logs",
+    "@aws-ops-tools/get_cloudwatch_metrics",
+    "@aws-ops-tools/get_cloudtrail_events",
+    "@aws-ops-tools/describe_aws_health",
+    "@aws-ops-tools/dry_run_remediation",
+    "@aws-ops-tools/check_metric_recovery",
+    "@aws-ops-tools/validate_stability_window"
+  ],
+
+  "toolsSettings": {
+    "shell": {
+      "allowedCommands": [
+        "aws cloudwatch get-metric-statistics",
+        "aws cloudwatch describe-alarms",
+        "aws logs start-query",
+        "aws logs get-query-results",
+        "aws lambda get-function-configuration",
+        "aws lambda get-account-settings",
+        "aws lambda get-function-concurrency",
+        "aws xray get-trace-summaries",
+        "aws ecs describe-services",
+        "aws ecs describe-tasks",
+        "aws rds describe-db-instances",
+        "aws ec2 describe-network-insights-analyses",
+        "aws health describe-events",
+        "aws cloudtrail lookup-events"
+      ]
+    }
+  },
+
+  "resources": [
+    "skill://.kiro/skills/**/SKILL.md"
+  ]
+}

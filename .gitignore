@@ -1,0 +1,27 @@
+# Runtime - incident operation artifacts
+.ops/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Node
+node_modules/
+*.log
+
+# Environment
+.env
+.env.local

@@ -1,0 +1,99 @@
+{
+  "project": "oh-my-aws",
+  "task": "AWS Incident Response Kiro CLI Skill - Phase 0~4 Implementation",
+  "created": "2026-04-03",
+  "plan_ref": ".omc/plans/aws-kiro-skill-implementation.md",
+  "stories": [
+    {"id":"US-001","title":"Phase 0: Kiro Skill spec","phase":0,"priority":1,"passes":true,"acceptanceCriteria":["(completed)"]},
+    {"id":"US-002","title":"Phase 0: MCP transport","phase":0,"priority":2,"passes":true,"acceptanceCriteria":["(completed)"]},
+    {"id":"US-003","title":"Phase 0: Approval gate + pivot","phase":0,"priority":3,"passes":true,"acceptanceCriteria":["(completed)"]},
+    {"id":"US-004","title":"Phase 1: SKILL.md dual-target","phase":1,"priority":4,"passes":true,"acceptanceCriteria":["(completed)"]},
+    {"id":"US-005","title":"Phase 1: Lambda timeout DKR","phase":1,"priority":5,"passes":true,"acceptanceCriteria":["(completed)"]},
+    {"id":"US-006","title":"Phase 1: Lambda throttle DKR","phase":1,"priority":6,"passes":true,"acceptanceCriteria":["(completed)"]},
+    {"id":"US-007","title":"Phase 1: Guardrails + specs","phase":1,"priority":7,"passes":true,"acceptanceCriteria":["(completed)"]},
+    {"id":"US-008","title":"Phase 2: Compute DKR","phase":2,"priority":8,"passes":true,"acceptanceCriteria":["(completed)"]},
+    {"id":"US-009","title":"Phase 2: Database DKR","phase":2,"priority":9,"passes":true,"acceptanceCriteria":["(completed)"]},
+    {"id":"US-010","title":"Phase 2: Platform DKR","phase":2,"priority":10,"passes":true,"acceptanceCriteria":["(completed)"]},
+    {"id":"US-011","title":"Phase 2: Security+Network DKR","phase":2,"priority":11,"passes":true,"acceptanceCriteria":["(completed)"]},
+    {"id":"US-012","title":"Phase 2: Routing + templates","phase":2,"priority":12,"passes":true,"acceptanceCriteria":["(completed)"]},
+    {
+      "id": "US-013",
+      "title": "Phase 3: MCP Server 스캐폴딩 + Observe 도구",
+      "phase": 3,
+      "priority": 13,
+      "passes": true,
+      "acceptanceCriteria": [
+        "mcp-servers/aws-ops-tools/pyproject.toml이 존재하고 fastmcp, boto3 의존성이 포함됨",
+        "mcp-servers/aws-ops-tools/server.py가 FastMCP 기반 MCP 서버 진입점임",
+        "mcp-servers/aws-ops-tools/tools/__init__.py가 존재함",
+        "tools/observe.py에 query_cloudwatch_logs 함수가 있고, log_group+query+time_range 파라미터를 받아 boto3 logs.start_query/get_query_results를 호출함",
+        "tools/observe.py에 get_cloudwatch_metrics 함수가 있고, namespace+metric_name+dimensions+statistic+period를 받아 cloudwatch.get_metric_statistics를 호출함",
+        "tools/observe.py에 get_cloudtrail_events 함수가 있고, boto3 cloudtrail.lookup_events를 호출함",
+        "tools/observe.py에 describe_aws_health 함수가 있고, boto3 health.describe_events를 호출함",
+        "모든 도구 함수에 타입 힌트(파라미터 + 반환)가 있음",
+        "모든 도구 함수에 에러 핸들링(try/except)이 있고 의미있는 에러 메시지를 반환함"
+      ]
+    },
+    {
+      "id": "US-014",
+      "title": "Phase 3: Act 도구 (승인 게이트 + dry-run) + Verify 도구",
+      "phase": 3,
+      "priority": 14,
+      "passes": true,
+      "acceptanceCriteria": [
+        "tools/act.py에 dry_run_remediation 함수가 있고, CLI 명령어+예상 영향+rollback 명령어를 반환함 (실행하지 않음)",
+        "tools/act.py에 execute_remediation 함수가 있고, guardrails 사전조건 검증 후 subprocess로 AWS CLI를 실행함",
+        "execute_remediation에서 risk=HIGH일 때 approval_required=true를 반환하고 실행을 차단함",
+        "execute_remediation에서 사전조건(pre_conditions) 검증 실패 시 실행을 차단하고 실패 사유를 반환함",
+        "tools/verify.py에 check_metric_recovery 함수가 있고, CloudWatch 메트릭이 정상 범위로 돌아왔는지 확인함",
+        "tools/verify.py에 validate_stability_window 함수가 있고, 지정 시간(초) 동안 메트릭을 폴링하여 안정성을 검증함",
+        "mcp-servers/aws-ops-tools/guardrails.py에 validate_pre_conditions 함수가 있음"
+      ]
+    },
+    {
+      "id": "US-015",
+      "title": "Phase 3: Kiro MCP 등록 + Agent JSON 업데이트",
+      "phase": 3,
+      "priority": 15,
+      "passes": true,
+      "acceptanceCriteria": [
+        ".kiro/settings/mcp.json에 aws-ops-tools 서버가 stdio transport로 등록됨",
+        ".kiro/agents/aws-incident-responder.json의 mcpServers에 aws-ops-tools가 추가됨",
+        "Agent JSON의 tools에 @aws-ops-tools 참조가 포함됨",
+        "Agent JSON의 allowedTools에 @aws-ops-tools/observe_*, @aws-ops-tools/verify_* 패턴이 있음",
+        "Agent JSON의 autoApprove에 observe 도구들이 포함되고, act 도구들은 미포함됨"
+      ]
+    },
+    {
+      "id": "US-016",
+      "title": "Phase 4: 잔여 DKR 6개 (ec2 + s3 + cloudfront + control-plane + s3-public + network-unauthorized)",
+      "phase": 4,
+      "priority": 16,
+      "passes": true,
+      "acceptanceCriteria": [
+        "scenarios/ec2-unreachable.yaml이 DKR v1 스키마를 준수하고 EC2-SYSTEM-CHECK/INSTANCE-CHECK/SG-BLOCK root_causes가 있음",
+        "scenarios/s3-access-denied.yaml이 DKR v1 스키마를 준수하고 S3-IAM/BUCKET-POLICY/CROSS-ACCOUNT/KMS/BPA root_causes가 있음",
+        "scenarios/cloudfront-issue.yaml이 DKR v1 스키마를 준수하고 CF-ORIGIN/CACHE-STALE/CERT/WAF root_causes가 있음",
+        "scenarios/control-plane-failure.yaml이 DKR v1 스키마를 준수하고 정적 안정성(Static Stability) 조치가 포함됨",
+        "scenarios/s3-public-exposure.yaml이 DKR v1 스키마를 준수하고 aws s3api put-public-access-block CLI가 포함됨",
+        "scenarios/network-unauthorized.yaml이 DKR v1 스키마를 준수하고 CloudTrail 기반 변경 감사 진단이 있음",
+        "총 20개 시나리오 DKR 파일이 scenarios/ 디렉토리에 존재함",
+        "6개 DKR 모두 remediation actions에 rollback_command가 포함됨"
+      ]
+    },
+    {
+      "id": "US-017",
+      "title": "Phase 4: Audit 파이프라인 (타임라인 + 포스트모템 템플릿)",
+      "phase": 4,
+      "priority": 17,
+      "passes": true,
+      "acceptanceCriteria": [
+        "audit/timeline-template.md가 존재하고 시간순 이벤트 기록 구조(timestamp, phase, action, evidence)가 정의됨",
+        "audit/postmortem-template.md가 존재하고 4개 필수 섹션(Executive Summary, Customer Impact, Timeline, Action Items)이 포함됨",
+        "postmortem-template.md의 Action Items에 owner/due-date/success-criterion/verification-method 필드가 정의됨",
+        "SKILL.md(golden source)의 Pipeline Step 5(Audit)가 audit/ 템플릿을 참조하도록 업데이트됨",
+        "Kiro 파생 SKILL.md도 동일하게 Audit 참조 업데이트됨"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,182 @@
+schema: decision-knowledge-record/v1
+
+metadata:
+  id: "dynamodb-throttle"
+  name: "DynamoDB 쓰로틀링"
+  description: "DynamoDB 테이블의 프로비저닝된 용량 초과로 ThrottledRequests 발생"
+  category: "database"
+  service: "dynamodb"
+  severity: "high"
+  tags: ["dynamodb", "throttle", "capacity", "hot-partition"]
+  source_refs:
+    - title: "DynamoDB Throttling"
+      url: "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/provisioned-capacity-mode.html"
+      type: "official_doc"
+    - title: "DynamoDB Best Practices"
+      url: "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/best-practices.html"
+      type: "official_doc"
+
+triggers:
+  - type: "metric_threshold"
+    description: "DynamoDB ThrottledRequests > 0"
+    condition: "AWS/DynamoDB.ThrottledRequests.Sum > 0 for 2 consecutive periods"
+
+symptoms:
+  - id: "s1"
+    description: "ThrottledRequests > 0"
+    metric: "AWS/DynamoDB | ThrottledRequests | Sum"
+  - id: "s2"
+    description: "ProvisionedRead/WriteCapacityUnits 소진"
+    metric: "AWS/DynamoDB | ConsumedReadCapacityUnits, ConsumedWriteCapacityUnits"
+  - id: "s3"
+    description: "애플리케이션 400 ProvisionedThroughputExceededException"
+    detection_method: "애플리케이션 로그"
+
+diagnosis:
+  decision_tree:
+    - step: 1
+      question: "테이블이 Provisioned 모드인가? (On-Demand가 아닌)"
+      check:
+        cli: "aws dynamodb describe-table --table-name <TABLE> --query 'Table.BillingModeSummary.BillingMode'"
+      branches:
+        - condition: "PROVISIONED"
+          result: "PROVISIONED_MODE"
+          next_step: 2
+        - condition: "PAY_PER_REQUEST"
+          result: "ON_DEMAND_MODE"
+          next_step: 3
+    - step: 2
+      question: "특정 파티션에 트래픽 집중인가?"
+      check:
+        metric: "AWS/DynamoDB | OnlineStoreLatency, SystemErrors"
+      branches:
+        - condition: "핫 파티션 패턴 감지"
+          result: "DDB-HOT-PARTITION"
+          next_step: 0
+        - condition: "전체 용량 부족"
+          result: "DDB-CAPACITY"
+          next_step: 0
+    - step: 3
+      question: "On-Dand 모드에서도 쓰로틀인가?"
+      check:
+        description: "On-Demand도 테이블당 초기 할당량 존재 (40K WCU/RCU), 급격한 트래픽 증가 시 일시적 쓰로틀 가능"
+      branches:
+        - condition: "초기 할당량 초과"
+          result: "DDB-BURST"
+          next_step: 0
+
+root_causes:
+  - code: "DDB-CAPACITY"
+    name: "프로비저닝 용량 부족"
+    description: "설정된 RCU/WCU가 실제 워크로드에 미치지 못함"
+    probability: "high"
+    related_symptoms: ["s1", "s2"]
+  - code: "DDB-HOT-PARTITION"
+    name: "핫 파티션"
+    description: "특정 파티션 키에 트래픽 집중으로 파티션 레벨 쓰로틀"
+    probability: "medium"
+    related_symptoms: ["s1", "s3"]
+  - code: "DDB-BURST"
+    name: "On-Demand 버스트 한계"
+    description: "급격한 트래픽 증가로 On-Demand 초기 할당량 초과"
+    probability: "low"
+    related_symptoms: ["s1"]
+
+remediation:
+  - root_cause_code: "DDB-CAPACITY"
+    actions:
+      - order: 1
+        name: "Auto Scaling 활성화 또는 용량 수동 증설"
+        type: "aws_cli"
+        command: |
+          aws dynamodb update-table --table-name <TABLE> \
+            --provisioned-throughput ReadCapacityUnits=<NEW_RCU>,WriteCapacityUnits=<NEW_WCU>
+        rollback_command: |
+          aws dynamodb update-table --table-name <TABLE> \
+            --provisioned-throughput ReadCapacityUnits=<ORIGINAL_RCU>,WriteCapacityUnits=<ORIGINAL_WCU>
+        risk: "medium"
+        requires_approval: true
+        estimated_impact:
+          cost: "증설량에 비례 — RCU $0.00013/시간, WCU $0.00065/시간 (us-east-1 기준)"
+          duration: "용량 변경 즉시 적용 (수분 이내)"
+          blast_radius: "해당 테이블 단독 — 용량 부족 시 다른 테이블 무영향"
+      - order: 2
+        name: "On-Demand 모드 전환"
+        type: "aws_cli"
+        command: |
+          aws dynamodb update-table --table-name <TABLE> \
+            --billing-mode PAY_PER_REQUEST
+        rollback_command: |
+          aws dynamodb update-table --table-name <TABLE> \
+            --billing-mode PROVISIONED \
+            --provisioned-throughput ReadCapacityUnits=<RCU>,WriteCapacityUnits=<WCU>
+        risk: "medium"
+        requires_approval: true
+        estimated_impact:
+          cost: "트래픽 기반 과금 — 피크 시 Provisioned 대비 최대 7배 비용 증가 가능"
+          duration: "전환 완료까지 수분, 이후 즉각 쓰로틀 해소"
+          blast_radius: "해당 테이블 단독 — 전환 중 짧은 요청 지연 가능"
+
+  - root_cause_code: "DDB-HOT-PARTITION"
+    actions:
+      - order: 1
+        name: "파티션 키 설계 변경 권고"
+        type: "manual"
+        command: "고카디널리티 파티션 키 설계, 샤딩 키 추가 권고"
+        rollback_command: |
+          # 파티션 키 설계 변경은 테이블 재생성이 필요하므로 직접 롤백 불가
+          # 단기 완화: On-Demand 모드로 전환하여 쓰로틀 완화
+          aws dynamodb update-table --table-name <TABLE> --billing-mode PAY_PER_REQUEST
+        risk: "medium"
+        requires_approval: true
+        estimated_impact:
+          cost: "파티션 키 재설계 시 데이터 마이그레이션 비용 발생 가능"
+          duration: "설계/구현 장기 과제 (즉각 완화: On-Demand 전환 후 수분)"
+          blast_radius: "애플리케이션 코드 변경 필요 — 테이블 재생성 시 서비스 일시 중단"
+
+  - root_cause_code: "DDB-BURST"
+    actions:
+      - order: 1
+        name: "On-Demand 모드로 긴급 전환"
+        type: "aws_cli"
+        command: |
+          aws dynamodb update-table --table-name <TABLE> \
+            --billing-mode PAY_PER_REQUEST
+        rollback_command: |
+          aws dynamodb update-table --table-name <TABLE> \
+            --billing-mode PROVISIONED \
+            --provisioned-throughput ReadCapacityUnits=<RCU>,WriteCapacityUnits=<WCU>
+        risk: "medium"
+        requires_approval: true
+        estimated_impact:
+          cost: "트래픽 기반 과금으로 전환 — 버스트 시 비용 급증 가능"
+          duration: "전환 완료까지 수분, 즉각 쓰로틀 완화"
+          blast_radius: "해당 테이블 단독 — 다른 테이블 무영향"
+
+guardrails:
+  pre_conditions:
+    - description: "용량 증설 전 비용 영향 표시"
+      check: "시간당/월간 예상 비용 계산 — RCU/WCU 단가 × 증설량 × 730시간"
+      block: true
+    - description: "On-Demand 모드 전환 시 하루 4회 변경 한도 확인"
+      check: "aws dynamodb describe-table --table-name <TABLE> --query 'Table.BillingModeSummary.LastUpdateToPayPerRequestDateTime' — 6시간 이내 변경 이력 없어야 함"
+      block: true
+  post_conditions:
+    - description: "ThrottledRequests = 0 확인"
+      check: "AWS/DynamoDB.ThrottledRequests.Sum = 0 for 5 minutes"
+      auto_rollback: true
+
+verification:
+  checks:
+    - name: "쓰로틀링 해소"
+      expected: "ThrottledRequests = 0"
+    - name: "지연 정상"
+      expected: "SuccessfulRequestLatency 정상 범위"
+  stability_window: 300
+  success_criteria: "ThrottledRequests = 0, 애플리케이션 에러 해소"
+
+escalation:
+  auto_remediate: false
+  approval_required: true
+  escalation_timeout: 600
+  notify: ["oncall"]

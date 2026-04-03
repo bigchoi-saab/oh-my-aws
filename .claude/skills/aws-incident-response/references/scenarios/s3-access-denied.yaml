@@ -1,0 +1,193 @@
+schema: decision-knowledge-record/v1
+
+metadata:
+  id: "s3-access-denied"
+  name: "S3 403 Access Denied"
+  description: "S3 객체/버킷 접근 시 403 AccessDenied 에러 발생"
+  category: "storage"
+  service: "s3"
+  severity: "medium"
+  tags: ["s3", "access-denied", "iam", "bucket-policy", "kms"]
+  source_refs:
+    - title: "S3 Troubleshoot 403 (re:Post)"
+      url: "https://repost.aws/knowledge-center/s3-troubleshoot-403"
+      type: "repost_kc"
+    - title: "S3 Access Control"
+      url: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/s3-access-control.html"
+      type: "official_doc"
+
+triggers:
+  - type: "log_pattern"
+    description: "CloudTrail S3 AccessDenied 이벤트"
+    condition: "eventSource=s3.amazonaws.com AND errorCode=AccessDenied"
+
+symptoms:
+  - id: "s1"
+    description: "s3:GetObject/PutObject 403 에러"
+    detection_method: "CloudTrail 이벤트"
+    log_query: |
+      fields @timestamp, eventName, errorCode, userIdentity.arn, requestParameters.bucketName
+      | filter eventSource = "s3.amazonaws.com" and errorCode = "AccessDenied"
+  - id: "s2"
+    description: "애플리케이션 S3 업로드/다운로드 실패"
+    detection_method: "애플리케이션 로그"
+
+diagnosis:
+  decision_tree:
+    - step: 1
+      question: "IAM Policy에 필요한 s3:GetObject/PutObject 권한이 있는가?"
+      check:
+        cli: |
+          aws iam simulate-principal-policy --policy-source-arn <ROLE_ARN> \
+            --action-names s3:GetObject --resource-arns arn:aws:s3:::<BUCKET>/<KEY>
+      branches:
+        - condition: "implicitDeny (권한 없음)"
+          result: "S3-IAM"
+          next_step: 0
+        - condition: "allowed"
+          result: "IAM_OK"
+          next_step: 2
+    - step: 2
+      question: "Bucket Policy에 명시적 Deny가 있는가?"
+      check:
+        cli: "aws s3api get-bucket-policy --bucket <BUCKET>"
+      branches:
+        - condition: "명시적 Deny 존재"
+          result: "S3-BUCKET-POLICY"
+          next_step: 0
+        - condition: "Bucket Policy 정상"
+          result: "POLICY_OK"
+          next_step: 3
+    - step: 3
+      question: "객체가 KMS 암호화되어 있는가?"
+      check:
+        cli: "aws s3api head-object --bucket <BUCKET> --key <KEY> --query 'ServerSideEncryption'"
+      branches:
+        - condition: "KMS 암호화"
+          result: "S3-KMS"
+          next_step: 0
+        - condition: "S3-S3 또는 미암호화"
+          result: "S3-CROSS-ACCOUNT"
+          next_step: 0
+
+root_causes:
+  - code: "S3-IAM"
+    name: "IAM 권한 누락"
+    description: "IAM Policy에 필요한 S3 Action이 없음"
+    probability: "high"
+  - code: "S3-BUCKET-POLICY"
+    name: "Bucket Policy 명시적 Deny"
+    description: "Bucket Policy에서 조건부 Deny로 차단"
+    probability: "medium"
+  - code: "S3-KMS"
+    name: "KMS Key Policy 복호화 권한 부재"
+    description: "객체 암호화에 사용된 KMS Key에 kms:Decrypt 권한 없음"
+    probability: "medium"
+  - code: "S3-CROSS-ACCOUNT"
+    name: "Cross-account 양쪽 허용 누락"
+    description: "Cross-account 접근 시 Bucket Policy + IAM Policy 양쪽 모두 허용 필요"
+    probability: "medium"
+
+remediation:
+  - root_cause_code: "S3-IAM"
+    actions:
+      - order: 1
+        name: "IAM Policy에 S3 권한 추가"
+        type: "aws_cli"
+        command: |
+          aws iam put-role-policy --role-name <ROLE> --policy-name S3Access \
+            --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetObject","s3:PutObject"],"Resource":"arn:aws:s3:::<BUCKET>/*"}]}'
+        rollback_command: |
+          aws iam delete-role-policy --role-name <ROLE> --policy-name S3Access
+        risk: "medium"
+        requires_approval: true
+        estimated_impact:
+          cost: "없음"
+          duration: "즉시 (IAM 전파 수초 이내)"
+          blast_radius: "해당 Role을 사용하는 모든 서비스에 S3 접근 권한 부여 — 최소 권한 원칙 준수 확인"
+
+  - root_cause_code: "S3-BUCKET-POLICY"
+    actions:
+      - order: 1
+        name: "Bucket Policy 수정"
+        type: "aws_cli"
+        command: "aws s3api put-bucket-policy --bucket <BUCKET> --policy file://policy.json"
+        rollback_command: "aws s3api delete-bucket-policy --bucket <BUCKET>"
+        risk: "medium"
+        requires_approval: true
+        estimated_impact:
+          cost: "없음"
+          duration: "즉시"
+          blast_radius: "버킷 전체 접근 정책 변경 — 다른 Principal의 접근에도 영향 가능"
+
+  - root_cause_code: "S3-KMS"
+    actions:
+      - order: 1
+        name: "KMS Key Policy에 kms:Decrypt 권한 추가"
+        type: "aws_cli"
+        command: "aws kms put-key-policy --key-id <KEY_ID> --policy-name default --policy file://key-policy.json"
+        rollback_command: "aws kms put-key-policy --key-id <KEY_ID> --policy-name default --policy file://original-key-policy.json"
+        risk: "high"
+        requires_approval: true
+        estimated_impact:
+          cost: "없음"
+          duration: "즉시"
+          blast_radius: "해당 KMS Key를 사용하는 모든 리소스에 영향 — Key Policy는 계정 전체 범위"
+
+  - root_cause_code: "S3-CROSS-ACCOUNT"
+    actions:
+      - order: 1
+        name: "양쪽 계정 모두에 권한 추가"
+        type: "manual"
+        command: "대상 계정 Bucket Policy + 호출 계정 IAM Policy 양쪽 수정"
+        rollback_command: |
+          # 대상 계정: aws s3api delete-bucket-policy --bucket <BUCKET>
+          # 호출 계정: aws iam delete-role-policy --role-name <ROLE> --policy-name CrossAccountS3
+        risk: "medium"
+        requires_approval: true
+        estimated_impact:
+          cost: "없음"
+          duration: "즉시 (양쪽 계정 변경 후 수초)"
+          blast_radius: "Cross-account 접근 허용 — 의도된 Principal만 허용되도록 Condition 키 적용 필요"
+
+guardrails:
+  pre_conditions:
+    - description: "CloudTrail에서 AccessDenied 이벤트의 IAM Principal ARN 확인 완료"
+      check: "userIdentity.arn 식별 완료 — 잘못된 Principal에 권한 부여 방지"
+      block: true
+    - description: "KMS Key Policy 변경 전 현재 정책 백업"
+      check: "aws kms get-key-policy --key-id <KEY_ID> --policy-name default > original-key-policy.json 실행 완료"
+      block: false
+  post_conditions:
+    - description: "s3:GetObject/PutObject 성공 확인"
+      check: "aws s3 cp s3://<BUCKET>/<KEY> /dev/null"
+      auto_rollback: false
+
+verification:
+  checks:
+    - name: "S3 접근 성공"
+      method: "aws_cli"
+      command: "aws s3 cp s3://<BUCKET>/<KEY> /dev/null && aws s3 cp /dev/null s3://<BUCKET>/test-write-probe"
+      expected: "403 에러 소멸, 객체 업로드/다운로드 정상"
+    - name: "CloudTrail AccessDenied 이벤트 소멸"
+      method: "CloudWatch Logs Insights"
+      command: |
+        fields @timestamp, errorCode, userIdentity.arn
+        | filter eventSource = "s3.amazonaws.com" and errorCode = "AccessDenied"
+        | stats count() as cnt by bin(5m)
+      expected: "cnt = 0 for 5 consecutive periods"
+    - name: "IAM Policy 시뮬레이션 통과"
+      method: "aws_cli"
+      command: |
+        aws iam simulate-principal-policy --policy-source-arn <ROLE_ARN> \
+          --action-names s3:GetObject --resource-arns arn:aws:s3:::<BUCKET>/<KEY> \
+          --query 'EvaluationResults[0].EvalDecision'
+      expected: "allowed"
+  stability_window: 300
+  success_criteria: "S3 403 에러 소멸"
+
+escalation:
+  auto_remediate: false
+  approval_required: true
+  escalation_timeout: 300
+  notify: ["oncall"]

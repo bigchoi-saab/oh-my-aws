@@ -1,0 +1,384 @@
+schema: handoff-schemas/v1
+description: "Agent 간 파일 핸드오프 계약. 모든 agent는 이 스키마에 맞춰 YAML을 생성/소비한다."
+version: "0.1.0"
+
+schemas:
+
+  # ─────────────────────────────────────────────
+  # Incident Response Pipeline
+  # ─────────────────────────────────────────────
+
+  observe:
+    description: "관측 수집 결과 — Diagnostician이 Observe 단계에서 생성"
+    producer: aws-diagnostician
+    consumers: [aws-diagnostician, aws-team-leader]
+    filename: observe.yaml
+    fields:
+      incident_id:
+        type: string
+        description: "인시던트 디렉토리명 (예: 2026-04-03T14-30-lambda-throttle)"
+        required: true
+      timestamp:
+        type: string
+        format: ISO8601
+        description: "관측 시작 시각"
+        required: true
+      scenario_id:
+        type: string
+        description: "DKR 시나리오 ID (예: lambda-throttle-concurrency-exhaustion)"
+        required: true
+      alarms:
+        type: array
+        description: "활성 CloudWatch 알람 목록"
+        items:
+          alarm_name: string
+          state: string
+          reason: string
+      metrics_snapshot:
+        type: array
+        description: "핵심 메트릭 현재값"
+        items:
+          metric_name: string
+          namespace: string
+          value: number
+          unit: string
+          period: string
+      recent_logs:
+        type: array
+        description: "관련 로그 에러 패턴"
+        items:
+          log_group: string
+          query: string
+          result_summary: string
+          sample_entries: array
+      recent_changes:
+        type: array
+        description: "CloudTrail 최근 변경 이벤트"
+        items:
+          event_time: string
+          event_name: string
+          user: string
+          resource: string
+      aws_health:
+        type: object
+        description: "AWS Health Dashboard 상태"
+        fields:
+          active_events: array
+          scheduled_changes: array
+      resource_state:
+        type: object
+        description: "대상 리소스 현재 설정 스냅샷"
+
+  diagnosis:
+    description: "진단 결과 — Diagnostician이 Reason 단계에서 생성"
+    producer: aws-diagnostician
+    consumers: [aws-team-leader, aws-executor]
+    filename: diagnosis.yaml
+    fields:
+      incident_id:
+        type: string
+        required: true
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+      scenario_id:
+        type: string
+        required: true
+      decision_tree_trace:
+        type: array
+        description: "Decision tree 탐색 경로"
+        items:
+          step: integer
+          question: string
+          check_command: string
+          result: string
+          branch_taken: string
+      root_cause_code:
+        type: string
+        description: "결정된 root cause 코드 (예: THROTTLE-ACCT)"
+        required: true
+      root_cause_name:
+        type: string
+        description: "사람이 읽을 수 있는 root cause 명칭"
+        required: true
+      confidence:
+        type: string
+        enum: [high, medium, low]
+        description: "진단 확신도"
+        required: true
+      evidence:
+        type: array
+        description: "진단 근거"
+        items:
+          type: string
+          source: string
+          detail: string
+      recommended_actions:
+        type: array
+        description: "DKR remediation에서 추출한 권장 조치 목록"
+        required: true
+        items:
+          order: integer
+          name: string
+          type: string
+          command: string
+          risk: string
+          rollback_command: string
+          estimated_impact: object
+      risk_level:
+        type: string
+        enum: [LOW, MEDIUM, HIGH]
+        description: "가장 높은 리스크 수준의 조치 기준"
+        required: true
+
+  execution:
+    description: "조치 실행 결과 — Executor가 Act 단계에서 생성"
+    producer: aws-executor
+    consumers: [aws-team-leader, aws-reporter]
+    filename: execution.yaml
+    fields:
+      incident_id:
+        type: string
+        required: true
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+      actions_executed:
+        type: array
+        description: "실행된 조치 목록"
+        required: true
+        items:
+          order: integer
+          action_name: string
+          command: string
+          risk: string
+          approval_status: string
+          execution_time: string
+          result:
+            type: object
+            fields:
+              success: boolean
+              output: string
+              error: string
+          rollback_command: string
+          rollback_executed: boolean
+
+  verification:
+    description: "검증 결과 — Executor가 Verify 단계에서 생성"
+    producer: aws-executor
+    consumers: [aws-team-leader, aws-reporter]
+    filename: verification.yaml
+    fields:
+      incident_id:
+        type: string
+        required: true
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+      checks:
+        type: array
+        description: "검증 체크 목록"
+        required: true
+        items:
+          name: string
+          check_command: string
+          expected: string
+          actual: string
+          passed: boolean
+      stability_window:
+        type: integer
+        description: "안정성 확인 대기 시간 (초)"
+      overall_result:
+        type: string
+        enum: [success, partial, failed]
+        required: true
+      rollback_triggered:
+        type: boolean
+        description: "롤백이 실행되었는지 여부"
+      rollback_reason:
+        type: string
+        description: "롤백 사유 (rollback_triggered가 true일 때)"
+
+  audit-report:
+    description: "감사 보고서 — Reporter가 Audit 단계에서 생성"
+    producer: aws-reporter
+    consumers: [user, follow-up-systems]
+    filename: audit-report.yaml
+    fields:
+      incident_id:
+        type: string
+        required: true
+      scenario_id:
+        type: string
+        required: true
+      severity:
+        type: string
+        required: true
+      started_at:
+        type: string
+        format: ISO8601
+      resolved_at:
+        type: string
+        format: ISO8601
+      duration_minutes:
+        type: number
+      timeline:
+        type: array
+        description: "전체 타임라인 (timestamp 기준 정렬)"
+        items:
+          timestamp: string
+          phase: string
+          actor: string
+          action: string
+          evidence: string
+      root_cause:
+        type: object
+        fields:
+          code: string
+          name: string
+          confidence: string
+      actions_taken:
+        type: array
+        items:
+          action_name: string
+          risk: string
+          result: string
+      verification_result:
+        type: string
+        enum: [success, partial, failed]
+      follow_ups:
+        type: array
+        description: "후속 조치 목록"
+        items:
+          category: string
+          description: string
+          priority: string
+      cdk_fix_needed:
+        type: boolean
+        description: "CDK 코드 반영이 필요한지 여부"
+        required: true
+      cdk_fix_details:
+        type: string
+        description: "어떤 CDK 변경이 필요한지 (cdk_fix_needed=true일 때)"
+
+  # ─────────────────────────────────────────────
+  # CDK Operations Pipeline
+  # ─────────────────────────────────────────────
+
+  cdk-analysis:
+    description: "CDK 코드 분석 결과 — CDK Analyzer가 생성"
+    producer: aws-cdk-analyzer
+    consumers: [aws-team-leader, aws-cdk-engineer]
+    filename: cdk-analysis.yaml
+    fields:
+      incident_id:
+        type: string
+        required: true
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+      target_stack:
+        type: string
+        description: "변경 대상 CDK 스택명"
+      target_construct:
+        type: object
+        description: "변경 대상 construct 정보"
+        fields:
+          file_path: string
+          construct_id: string
+          construct_type: string
+          line_range: string
+      current_config:
+        type: object
+        description: "CDK 코드에 정의된 현재 설정값"
+      required_change:
+        type: object
+        description: "변경해야 할 설정값"
+        fields:
+          property: string
+          from_value: string
+          to_value: string
+          reason: string
+      impact_assessment:
+        type: object
+        description: "변경 영향 분석"
+        fields:
+          other_stacks_affected: array
+          deployment_risk: string
+          estimated_downtime: string
+      affected_resources:
+        type: array
+        description: "영향받는 AWS 리소스 목록"
+        items:
+          resource_type: string
+          resource_id: string
+          impact: string
+
+  cdk-changes:
+    description: "CDK 코드 변경 결과 — CDK Engineer가 생성"
+    producer: aws-cdk-engineer
+    consumers: [aws-team-leader, aws-reporter]
+    filename: cdk-changes.yaml
+    fields:
+      incident_id:
+        type: string
+        required: true
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+      files_modified:
+        type: array
+        description: "수정된 파일 목록"
+        items:
+          file_path: string
+          change_summary: string
+      diff_summary:
+        type: string
+        description: "변경 요약"
+      synth_result:
+        type: object
+        description: "cdk synth 실행 결과"
+        fields:
+          success: boolean
+          output: string
+          errors: array
+      cdk_diff_output:
+        type: string
+        description: "cdk diff 전체 출력"
+      deploy_ready:
+        type: boolean
+        description: "배포 준비 완료 여부"
+        required: true
+
+  cdk-report:
+    description: "CDK 변경 감사 보고서 — Reporter가 생성"
+    producer: aws-reporter
+    consumers: [user]
+    filename: cdk-report.yaml
+    fields:
+      incident_id:
+        type: string
+        required: true
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+      cdk_change_summary:
+        type: string
+        description: "CDK 변경 요약"
+      files_modified:
+        type: array
+        items:
+          file_path: string
+          change_summary: string
+      deploy_status:
+        type: string
+        enum: [deployed, pending_approval, skipped]
+      verification_result:
+        type: string
+        description: "배포 후 검증 결과"

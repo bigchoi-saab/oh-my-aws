@@ -1,0 +1,674 @@
+schema: "decision-knowledge-record/v1"
+
+metadata:
+  id: "ecs-crash-loop"
+  name: "ECS Task Crash Loop"
+  description: >
+    ECS service repeatedly starts and immediately stops tasks, entering a crash loop.
+    The service's RunningTaskCount drops below the desired count and ECS continuously
+    attempts replacement tasks that also fail. Covers five root causes: out-of-memory
+    (exit 137), application startup error (exit 1), image pull failure
+    (CannotPullContainerError), secrets or parameter initialization failure
+    (ResourceInitializationError), and health check misconfiguration causing ECS to
+    kill otherwise healthy tasks before they finish initializing.
+  category: "compute"
+  service: "ecs"
+  severity: "critical"
+  tags:
+    - ecs
+    - fargate
+    - crash-loop
+    - oom
+    - health-check
+    - image-pull
+    - secrets-manager
+    - task-definition
+    - container
+  source_refs:
+    - title: "Troubleshooting ECS – Service Events"
+      url: "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service-event-messages.html"
+      type: "troubleshooting_guide"
+    - title: "ECS – Stopped Task Error Codes"
+      url: "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/stopped-task-errors.html"
+      type: "official_doc"
+    - title: "ECS – Health Check Grace Period"
+      url: "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/service_definition_parameters.html#sd-healthCheckGracePeriodSeconds"
+      type: "official_doc"
+    - title: "ECS – Task Definition Parameters – Memory"
+      url: "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_definition_parameters.html#container_definitions"
+      type: "official_doc"
+    - title: "ECS – Private Registry Authentication"
+      url: "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/private-auth.html"
+      type: "official_doc"
+    - title: "ECS – Secrets Manager Integration"
+      url: "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/secrets-envvar-secrets-manager.html"
+      type: "official_doc"
+    - title: "Troubleshoot ECS Task Stopped Errors (re:Post)"
+      url: "https://repost.aws/knowledge-center/ecs-task-stopped"
+      type: "repost_kc"
+    - title: "Troubleshoot ECS Service unable to start tasks (re:Post)"
+      url: "https://repost.aws/knowledge-center/ecs-unable-to-start-tasks"
+      type: "repost_kc"
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+triggers:
+  type: "metric_threshold"
+  description: >
+    ECS service events contain 'unable to start tasks' OR RunningTaskCount drops
+    below desired count and does not recover within the deployment stabilization window.
+  condition: >
+    ECS Service Event message contains 'unable to start tasks' OR
+    AWS/ECS RunningTaskCount < DesiredTaskCount for > 5 minutes
+  cloudwatch_alarm_example: |
+    MetricName: RunningTaskCount
+    Namespace: AWS/ECS
+    Dimensions:
+      - Name: ClusterName
+        Value: <CLUSTER_NAME>
+      - Name: ServiceName
+        Value: <SERVICE_NAME>
+    Statistic: Minimum
+    Period: 60
+    EvaluationPeriods: 5
+    Threshold: <DESIRED_TASK_COUNT>
+    ComparisonOperator: LessThanThreshold
+
+# ---------------------------------------------------------------------------
+# SYMPTOMS
+# ---------------------------------------------------------------------------
+symptoms:
+  - id: "SYM-01"
+    description: "ECS service event log contains 'unable to start tasks' message"
+    detection_method: "ECS Service Events – aws ecs describe-services"
+    cli: >
+      aws ecs describe-services
+      --cluster <CLUSTER_NAME>
+      --services <SERVICE_NAME>
+      --query 'services[0].events[0:10]'
+
+  - id: "SYM-02"
+    description: "RunningTaskCount below DesiredCount and not recovering"
+    detection_method: "CloudWatch Metrics – AWS/ECS"
+    metric: "AWS/ECS | RunningTaskCount | Minimum – below DesiredTaskCount"
+
+  - id: "SYM-03"
+    description: "Tasks in STOPPED state with stoppedReason populated"
+    detection_method: "aws ecs list-tasks with desiredStatus=STOPPED"
+    cli: >
+      aws ecs list-tasks
+      --cluster <CLUSTER_NAME>
+      --service-name <SERVICE_NAME>
+      --desired-status STOPPED
+
+  - id: "SYM-04"
+    description: "Container exitCode 137 in stopped task description (OOM kill)"
+    detection_method: "aws ecs describe-tasks – containers[].exitCode"
+    metric: "ECS task container exitCode = 137"
+
+  - id: "SYM-05"
+    description: "Container exitCode 1 in stopped task description (application error)"
+    detection_method: "aws ecs describe-tasks – containers[].exitCode"
+    metric: "ECS task container exitCode = 1"
+
+  - id: "SYM-06"
+    description: "stoppedReason contains 'CannotPullContainerError'"
+    detection_method: "aws ecs describe-tasks – stoppedReason field"
+    metric: "ECS stoppedReason = CannotPullContainerError"
+
+  - id: "SYM-07"
+    description: "stoppedReason contains 'ResourceInitializationError' (secrets/SSM fetch failure)"
+    detection_method: "aws ecs describe-tasks – stoppedReason field"
+    metric: "ECS stoppedReason = ResourceInitializationError"
+
+  - id: "SYM-08"
+    description: "Task health check failing repeatedly – container reaches UNHEALTHY state"
+    detection_method: "aws ecs describe-tasks – containers[].healthStatus"
+    metric: "ECS container healthStatus = UNHEALTHY"
+
+# ---------------------------------------------------------------------------
+# DIAGNOSIS – DECISION TREE
+# ---------------------------------------------------------------------------
+diagnosis:
+  decision_tree:
+    - step: 1
+      question: "Retrieve the stoppedReason and exitCode from the most recently stopped task."
+      check:
+        cli: >
+          TASK_ARN=$(aws ecs list-tasks
+          --cluster <CLUSTER_NAME>
+          --service-name <SERVICE_NAME>
+          --desired-status STOPPED
+          --query 'taskArns[0]' --output text) &&
+          aws ecs describe-tasks
+          --cluster <CLUSTER_NAME>
+          --tasks $TASK_ARN
+          --query 'tasks[0].{stoppedReason:stoppedReason,exitCode:containers[0].exitCode,healthStatus:containers[0].healthStatus,reason:containers[0].reason}'
+      branches:
+        - condition: "exitCode = 137"
+          result: "ECS-OOM – container killed by kernel OOM killer"
+          next_step: 0
+        - condition: "exitCode = 1 (or non-zero, non-137)"
+          result: "ECS-APP-ERROR – application startup or runtime error"
+          next_step: 2
+        - condition: "stoppedReason contains 'CannotPullContainerError'"
+          result: "ECS-IMAGE-PULL – container image cannot be retrieved"
+          next_step: 3
+        - condition: "stoppedReason contains 'ResourceInitializationError'"
+          result: "ECS-SECRET-INIT – secrets or parameter fetch failed during task init"
+          next_step: 4
+        - condition: "healthStatus = UNHEALTHY and exitCode absent"
+          result: "ECS-HEALTH-FAIL – task killed by ECS health check, not application crash"
+          next_step: 5
+
+    - step: 2
+      question: "Is the application error caused by a recent deployment?"
+      check:
+        cli: >
+          aws ecs describe-services
+          --cluster <CLUSTER_NAME>
+          --services <SERVICE_NAME>
+          --query 'services[0].deployments'
+      branches:
+        - condition: "New deployment active and error started at deployment time"
+          result: "ECS-APP-ERROR – regression introduced by recent deployment; rollback indicated"
+          next_step: 0
+        - condition: "No recent deployment – error pre-existing or external dependency"
+          result: "ECS-APP-ERROR – check CloudWatch Logs for application stack trace"
+          next_step: 0
+
+    - step: 3
+      question: "Is the image URI valid, and does the task execution role have ECR pull permissions?"
+      check:
+        cli_image: >
+          aws ecr describe-images
+          --repository-name <REPO_NAME>
+          --image-ids imageTag=<TAG>
+        cli_policy: >
+          aws iam simulate-principal-policy
+          --policy-source-arn <TASK_EXECUTION_ROLE_ARN>
+          --action-names ecr:GetAuthorizationToken ecr:BatchCheckLayerAvailability ecr:GetDownloadUrlForLayer ecr:BatchGetImage
+          --resource-arns '*'
+      branches:
+        - condition: "Image tag does not exist in ECR"
+          result: "ECS-IMAGE-PULL – image tag was deleted or never pushed; fix image reference"
+          next_step: 0
+        - condition: "ECR permissions missing on task execution role"
+          result: "ECS-IMAGE-PULL – add ecr:GetAuthorizationToken and ecr:BatchGetImage to execution role"
+          next_step: 0
+        - condition: "Image exists and permissions correct – network issue"
+          result: "ECS-IMAGE-PULL – check VPC routing to ECR endpoint or add VPC endpoint"
+          next_step: 0
+
+    - step: 4
+      question: "Does the task execution role have permissions to fetch the referenced secrets or parameters?"
+      check:
+        cli: >
+          aws iam simulate-principal-policy
+          --policy-source-arn <TASK_EXECUTION_ROLE_ARN>
+          --action-names secretsmanager:GetSecretValue ssm:GetParameters kms:Decrypt
+          --resource-arns <SECRET_ARN_OR_PARAMETER_ARN>
+      branches:
+        - condition: "secretsmanager:GetSecretValue denied"
+          result: "ECS-SECRET-INIT – add secretsmanager:GetSecretValue to task execution role"
+          next_step: 0
+        - condition: "ssm:GetParameters denied"
+          result: "ECS-SECRET-INIT – add ssm:GetParameters to task execution role"
+          next_step: 0
+        - condition: "kms:Decrypt denied (for customer-managed KMS key)"
+          result: "ECS-SECRET-INIT – add kms:Decrypt for the CMK to task execution role"
+          next_step: 0
+        - condition: "Permissions correct – secret ARN in task definition may be invalid"
+          result: "ECS-SECRET-INIT – verify secret name and ARN in task definition container secrets"
+          next_step: 0
+
+    - step: 5
+      question: "Is the health check grace period long enough for the application to initialize?"
+      check:
+        cli_service: >
+          aws ecs describe-services
+          --cluster <CLUSTER_NAME>
+          --services <SERVICE_NAME>
+          --query 'services[0].healthCheckGracePeriodSeconds'
+        cli_taskdef: >
+          aws ecs describe-task-definition
+          --task-definition <TASK_DEFINITION_ARN>
+          --query 'taskDefinition.containerDefinitions[0].healthCheck'
+      branches:
+        - condition: "healthCheckGracePeriodSeconds < application startup time"
+          result: "ECS-HEALTH-FAIL – increase health check grace period to cover application startup"
+          next_step: 0
+        - condition: "Health check interval too short or threshold too low"
+          result: "ECS-HEALTH-FAIL – increase healthCheck interval or unhealthyThreshold in task definition"
+          next_step: 0
+        - condition: "Health check endpoint returns non-2xx during normal startup (expected)"
+          result: "ECS-HEALTH-FAIL – application not ready at health check path during init; fix endpoint or grace period"
+          next_step: 0
+
+# ---------------------------------------------------------------------------
+# ROOT CAUSES
+# ---------------------------------------------------------------------------
+root_causes:
+  - code: "ECS-OOM"
+    name: "Container killed by OOM killer – insufficient memory allocation"
+    description: >
+      The container exceeded its memory limit and was terminated by the Linux OOM killer,
+      resulting in exit code 137 (128 + SIGKILL). This occurs when the task definition
+      memory (or container-level memory limit) is lower than the application's working
+      set. Common triggers include memory leaks, insufficient initial allocation, or
+      spikes in request load. ECS immediately attempts a replacement task, which also
+      OOMs, producing the crash loop.
+    probability: "high"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-02"
+      - "SYM-03"
+      - "SYM-04"
+
+  - code: "ECS-APP-ERROR"
+    name: "Application startup or runtime error – non-zero exit code"
+    description: >
+      The containerized application exits with a non-zero, non-137 exit code (commonly 1)
+      due to a bug, missing environment variable, invalid configuration, or failed
+      dependency connection at startup. If caused by a recent deployment, a rollback to
+      the last good task definition is the fastest remediation path.
+    probability: "high"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-02"
+      - "SYM-03"
+      - "SYM-05"
+
+  - code: "ECS-IMAGE-PULL"
+    name: "Container image cannot be pulled – CannotPullContainerError"
+    description: >
+      ECS cannot retrieve the container image from the registry. Root causes include:
+      image tag deleted from ECR after the task definition was registered, missing
+      ecr:GetAuthorizationToken or ecr:BatchGetImage permissions on the task execution
+      role, or a VPC networking issue preventing the container agent from reaching the
+      ECR endpoint (missing VPC endpoint or NAT Gateway).
+    probability: "medium"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-02"
+      - "SYM-03"
+      - "SYM-06"
+
+  - code: "ECS-SECRET-INIT"
+    name: "Secrets Manager or SSM parameter fetch fails during task initialization"
+    description: >
+      ECS fetches secrets referenced in the task definition's container secrets or
+      environment block before starting the container. If the task execution role lacks
+      secretsmanager:GetSecretValue, ssm:GetParameters, or kms:Decrypt permissions,
+      or if the secret ARN is incorrect, ECS reports ResourceInitializationError and
+      the task never starts. Every replacement task hits the same IAM or ARN issue.
+    probability: "medium"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-02"
+      - "SYM-03"
+      - "SYM-07"
+
+  - code: "ECS-HEALTH-FAIL"
+    name: "Health check kills task before application finishes initializing"
+    description: >
+      The ECS service or load balancer health check marks the container UNHEALTHY before
+      the application completes initialization. ECS replaces the task, which also fails
+      the same health check, creating a crash loop. Common causes: healthCheckGracePeriodSeconds
+      set too short on the service, health check interval too aggressive in the task
+      definition, or the health check path returning non-2xx during normal startup.
+    probability: "medium"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-02"
+      - "SYM-08"
+
+# ---------------------------------------------------------------------------
+# REMEDIATION
+# ---------------------------------------------------------------------------
+remediation:
+  - root_cause_code: "ECS-OOM"
+    actions:
+      - order: 1
+        name: "Increase task memory in a new task definition revision"
+        description: >
+          Register a new task definition revision with increased memory (and optionally
+          CPU) for the affected container. Update the service to use the new revision.
+          Start with 1.5x–2x the current allocation. Monitor CloudWatch Container Insights
+          MemoryUtilized metric after the new tasks start to validate the new limit.
+          Do not use the same task definition family ARN – register a new revision.
+        type: "aws_cli"
+        command: >
+          NEW_TASKDEF=$(aws ecs describe-task-definition
+          --task-definition <TASK_DEFINITION_FAMILY>
+          --query 'taskDefinition' --output json |
+          jq '.memory = "<NEW_MEMORY_MIB>" | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)') &&
+          aws ecs register-task-definition --cli-input-json "$NEW_TASKDEF" &&
+          aws ecs update-service
+          --cluster <CLUSTER_NAME>
+          --service <SERVICE_NAME>
+          --task-definition <TASK_DEFINITION_FAMILY>
+        rollback_command: >
+          aws ecs update-service
+          --cluster <CLUSTER_NAME>
+          --service <SERVICE_NAME>
+          --task-definition <LAST_GOOD_TASK_DEFINITION_ARN>
+        risk: "low"
+        requires_approval: false
+        estimated_impact: >
+          Fargate cost is proportional to vCPU and memory allocated per task.
+          Increasing memory increases per-task cost. Confirm new memory value
+          with capacity planning before applying.
+
+  - root_cause_code: "ECS-APP-ERROR"
+    actions:
+      - order: 1
+        name: "Roll back to the last known-good task definition"
+        description: >
+          If the crash loop started after a deployment, rolling back to the previous
+          task definition revision is the fastest path to service restoration.
+          Identify the last good revision from deployment history, update the service,
+          and force a new deployment to replace failing tasks with the working image.
+        type: "aws_cli"
+        command: >
+          aws ecs update-service
+          --cluster <CLUSTER_NAME>
+          --service <SERVICE_NAME>
+          --task-definition <LAST_GOOD_TASK_DEFINITION_ARN>
+          --force-new-deployment
+        rollback_command: >
+          aws ecs update-service
+          --cluster <CLUSTER_NAME>
+          --service <SERVICE_NAME>
+          --task-definition <CURRENT_TASK_DEFINITION_ARN>
+          --force-new-deployment
+        risk: "low"
+        requires_approval: false
+        estimated_impact: >
+          Rolling deployment replaces tasks using the service's deployment configuration
+          (minimumHealthyPercent / maximumPercent). Brief capacity reduction during
+          replacement is expected. No cost impact beyond standard task runtime.
+      - order: 2
+        name: "Check CloudWatch Logs for application stack trace before rollback"
+        description: >
+          Before rolling back, capture the application error from CloudWatch Logs to
+          understand the root cause and prevent recurrence. This is a diagnostic step
+          that does not affect the running service.
+        type: "aws_cli"
+        command: >
+          aws logs filter-log-events
+          --log-group-name /ecs/<TASK_DEFINITION_FAMILY>
+          --start-time $(date -u -d '30 minutes ago' +%s000)
+          --filter-pattern "ERROR"
+          --limit 50
+        rollback_command: >
+          echo "Read-only diagnostic command – no rollback needed"
+        risk: "none"
+        requires_approval: false
+        estimated_impact: "No cost or service impact. CloudWatch Logs read operation."
+
+  - root_cause_code: "ECS-IMAGE-PULL"
+    actions:
+      - order: 1
+        name: "Verify image exists in ECR and fix image URI or tag in task definition"
+        description: >
+          Confirm the image tag referenced in the task definition exists in the ECR
+          repository. If the tag was deleted, push the correct image or update the
+          task definition to reference an existing tag. Register a new task definition
+          revision and update the service.
+        type: "aws_cli"
+        command: >
+          aws ecr describe-images
+          --repository-name <REPO_NAME>
+          --query 'imageDetails[*].{digest:imageDigest,tags:imageTags,pushedAt:imagePushedAt}'
+          --output table
+        rollback_command: >
+          aws ecs update-service
+          --cluster <CLUSTER_NAME>
+          --service <SERVICE_NAME>
+          --task-definition <LAST_GOOD_TASK_DEFINITION_ARN>
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "No direct cost impact. Fixing image reference resolves pull failure immediately."
+      - order: 2
+        name: "Grant ECR permissions to the task execution role"
+        description: >
+          Attach the AWS-managed AmazonECSTaskExecutionRolePolicy to the task execution
+          role, which includes all required ECR pull permissions. If using a custom policy,
+          add ecr:GetAuthorizationToken, ecr:BatchCheckLayerAvailability,
+          ecr:GetDownloadUrlForLayer, and ecr:BatchGetImage.
+        type: "aws_cli"
+        command: >
+          aws iam attach-role-policy
+          --role-name <TASK_EXECUTION_ROLE_NAME>
+          --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        rollback_command: >
+          aws iam detach-role-policy
+          --role-name <TASK_EXECUTION_ROLE_NAME>
+          --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "IAM policy change takes effect immediately. No cost impact."
+
+  - root_cause_code: "ECS-SECRET-INIT"
+    actions:
+      - order: 1
+        name: "Grant secretsmanager:GetSecretValue and kms:Decrypt to task execution role"
+        description: >
+          Add an inline policy or attach a managed policy to the task execution role
+          granting access to the specific secret ARNs referenced in the task definition.
+          For customer-managed KMS keys, also grant kms:Decrypt. Use least-privilege
+          resource ARNs rather than wildcards.
+        type: "aws_cli"
+        command: >
+          aws iam put-role-policy
+          --role-name <TASK_EXECUTION_ROLE_NAME>
+          --policy-name ECSSecretsAccess
+          --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"secretsmanager:GetSecretValue\",\"kms:Decrypt\"],\"Resource\":[\"<SECRET_ARN>\",\"<KMS_KEY_ARN>\"]}]}"
+        rollback_command: >
+          aws iam delete-role-policy
+          --role-name <TASK_EXECUTION_ROLE_NAME>
+          --policy-name ECSSecretsAccess
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "IAM policy change takes effect within seconds. No cost impact."
+      - order: 2
+        name: "Verify secret ARN and name in task definition container secrets"
+        description: >
+          Confirm the valueFrom ARN in the task definition container secrets block
+          matches the actual Secrets Manager secret ARN (including region and account ID).
+          A single character difference in the ARN causes ResourceInitializationError.
+          Register a corrected task definition revision and update the service.
+        type: "aws_cli"
+        command: >
+          aws secretsmanager describe-secret
+          --secret-id <SECRET_NAME_OR_ARN>
+          --query '{ARN:ARN,Name:Name}'
+        rollback_command: >
+          aws ecs update-service
+          --cluster <CLUSTER_NAME>
+          --service <SERVICE_NAME>
+          --task-definition <LAST_GOOD_TASK_DEFINITION_ARN>
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "Read-only secret metadata lookup. No cost or service impact."
+
+  - root_cause_code: "ECS-HEALTH-FAIL"
+    actions:
+      - order: 1
+        name: "Increase health check grace period on the ECS service"
+        description: >
+          Set healthCheckGracePeriodSeconds to a value that exceeds the application's
+          maximum observed startup time. This prevents the load balancer or ECS health
+          check from marking the task UNHEALTHY during initialization. A safe default
+          is application_startup_time * 2. The change takes effect on the next deployment.
+        type: "aws_cli"
+        command: >
+          aws ecs update-service
+          --cluster <CLUSTER_NAME>
+          --service <SERVICE_NAME>
+          --health-check-grace-period-seconds <NEW_GRACE_PERIOD_SECONDS>
+        rollback_command: >
+          aws ecs update-service
+          --cluster <CLUSTER_NAME>
+          --service <SERVICE_NAME>
+          --health-check-grace-period-seconds <PREVIOUS_GRACE_PERIOD_SECONDS>
+        risk: "low"
+        requires_approval: false
+        estimated_impact: >
+          Longer grace period means ECS waits longer before marking tasks unhealthy.
+          This slightly delays detection of genuine startup failures. Maximum value
+          is 2147483647 seconds; keep it reasonable (60-300s for most applications).
+      - order: 2
+        name: "Adjust container health check interval and unhealthy threshold in task definition"
+        description: >
+          Register a new task definition revision with a less aggressive health check:
+          increase the interval (default 30s), timeout (default 5s), or unhealthyThreshold
+          (default 3 failures) to allow the application more time to reach a healthy state.
+        type: "aws_cli"
+        command: >
+          NEW_TASKDEF=$(aws ecs describe-task-definition
+          --task-definition <TASK_DEFINITION_FAMILY>
+          --query 'taskDefinition' --output json |
+          jq '.containerDefinitions[0].healthCheck.interval = 30 |
+              .containerDefinitions[0].healthCheck.startPeriod = <APP_STARTUP_SECONDS> |
+              del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy)') &&
+          aws ecs register-task-definition --cli-input-json "$NEW_TASKDEF" &&
+          aws ecs update-service
+          --cluster <CLUSTER_NAME>
+          --service <SERVICE_NAME>
+          --task-definition <TASK_DEFINITION_FAMILY>
+          --force-new-deployment
+        rollback_command: >
+          aws ecs update-service
+          --cluster <CLUSTER_NAME>
+          --service <SERVICE_NAME>
+          --task-definition <LAST_GOOD_TASK_DEFINITION_ARN>
+          --force-new-deployment
+        risk: "low"
+        requires_approval: false
+        estimated_impact: >
+          Registering a new task definition revision and forcing a new deployment causes
+          a rolling restart. Tasks are replaced according to minimumHealthyPercent setting.
+
+# ---------------------------------------------------------------------------
+# GUARDRAILS
+# ---------------------------------------------------------------------------
+guardrails:
+  pre_conditions:
+    - description: "Check current RunningTaskCount before initiating rollback or deployment"
+      check: >
+        Run: aws ecs describe-services --cluster <CLUSTER> --services <SERVICE>
+        --query 'services[0].{running:runningCount,desired:desiredCount,pending:pendingCount}'
+        Confirm whether any tasks are currently running before applying changes.
+        If RunningTaskCount is 0, the service has no capacity; rollback is urgent.
+      block: false
+
+    - description: "Verify the last-good task definition ARN exists before rollback"
+      check: >
+        Run: aws ecs describe-task-definition --task-definition <LAST_GOOD_TASK_DEFINITION_ARN>
+        Confirm the revision exists and is in ACTIVE status. Rolling back to a
+        DEREGISTERED task definition will fail.
+      block: true
+
+    - description: "Confirm memory increase is supported by cluster capacity (EC2 launch type)"
+      check: >
+        For EC2 launch type: verify the cluster has sufficient free memory across
+        container instances to schedule tasks with the new memory value.
+        For Fargate: confirm the memory value is a valid Fargate-supported combination
+        with the configured vCPU value per AWS documentation.
+      block: false
+
+    - description: "IAM role changes must use least-privilege resource ARNs"
+      check: >
+        Confirm that secretsmanager:GetSecretValue and kms:Decrypt permissions are
+        scoped to specific secret ARNs and KMS key ARNs, not wildcards (*).
+        Wildcard resource grants on secrets are a security risk.
+      block: true
+
+  post_conditions:
+    - description: "RunningTaskCount must equal DesiredCount and remain stable"
+      check: >
+        Monitor AWS/ECS RunningTaskCount for the service. After remediation,
+        RunningTaskCount must reach DesiredCount and remain stable for at least
+        5 consecutive minutes without new task replacements.
+      auto_rollback: false
+
+    - description: "No new 'unable to start tasks' events in service event log"
+      check: >
+        Poll: aws ecs describe-services --cluster <CLUSTER> --services <SERVICE>
+        --query 'services[0].events[0:3]'
+        Confirm no new 'unable to start tasks' events appear after the fix is applied.
+      auto_rollback: true
+
+# ---------------------------------------------------------------------------
+# VERIFICATION
+# ---------------------------------------------------------------------------
+verification:
+  checks:
+    - name: "RunningTaskCount equals DesiredCount"
+      method: "CloudWatch Metrics – AWS/ECS"
+      expected: "RunningTaskCount == DesiredCount for 5 consecutive minutes"
+      metric:
+        namespace: "AWS/ECS"
+        metric_name: "RunningTaskCount"
+        statistic: "Minimum"
+        threshold: ">= DesiredTaskCount"
+
+    - name: "No new 'unable to start tasks' service events"
+      method: "ECS Service Events – aws ecs describe-services"
+      expected: "Most recent service event is a successful task registration, not a failure"
+      cli: >
+        aws ecs describe-services
+        --cluster <CLUSTER_NAME>
+        --services <SERVICE_NAME>
+        --query 'services[0].events[0].message'
+
+    - name: "No tasks in STOPPED state with crash-loop stoppedReason"
+      method: "aws ecs list-tasks with desiredStatus=STOPPED"
+      expected: "No new STOPPED tasks with OOM, CannotPullContainerError, or ResourceInitializationError reasons"
+      cli: >
+        aws ecs list-tasks
+        --cluster <CLUSTER_NAME>
+        --service-name <SERVICE_NAME>
+        --desired-status STOPPED
+
+    - name: "Target group healthy host count at expected level (if ALB integrated)"
+      method: "CloudWatch Metrics – AWS/ApplicationELB"
+      expected: "HealthyHostCount equals DesiredCount for the target group"
+      metric:
+        namespace: "AWS/ApplicationELB"
+        metric_name: "HealthyHostCount"
+        statistic: "Minimum"
+        threshold: ">= DesiredTaskCount"
+
+    - name: "Application-level error rate not elevated post-remediation"
+      method: "CloudWatch Metrics or application logs"
+      expected: "HTTP 5xx error rate at or below pre-incident baseline within 5 minutes of task stabilization"
+      metric:
+        namespace: "AWS/ApplicationELB"
+        metric_name: "HTTPCode_Target_5XX_Count"
+        statistic: "Sum"
+        threshold: "<= pre_action_baseline"
+
+  stability_window: 300
+  success_criteria: >
+    All of the following for 5 consecutive minutes:
+    (1) RunningTaskCount equals DesiredCount,
+    (2) No new 'unable to start tasks' ECS service events,
+    (3) No new STOPPED tasks with crash-loop exit codes,
+    (4) HealthyHostCount (if ALB) equals DesiredCount,
+    (5) Application error rate at or below pre-incident baseline.
+
+# ---------------------------------------------------------------------------
+# ESCALATION
+# ---------------------------------------------------------------------------
+escalation:
+  auto_remediate: false
+  approval_required: true
+  escalation_timeout: 300
+  notify:
+    - oncall
+    - platform-team
+    - service-owner

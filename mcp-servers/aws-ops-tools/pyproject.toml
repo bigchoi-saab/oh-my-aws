@@ -1,0 +1,24 @@
+[project]
+name = "aws-ops-tools"
+version = "0.1.0"
+description = "MCP server providing AWS operations tools for incident response (Observe/Act/Verify pipeline)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastmcp>=2.0.0",
+    "boto3>=1.35.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "moto>=5.0",
+    "ruff>=0.8",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 120

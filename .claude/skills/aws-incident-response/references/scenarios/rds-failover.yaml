@@ -1,0 +1,145 @@
+schema: decision-knowledge-record/v1
+
+metadata:
+  id: "rds-failover"
+  name: "RDS Multi-AZ 장애 조치"
+  description: "RDS Multi-AZ 구성에서 자동/수동 장애 조치(Failover) 발생 후 애플리케이션 연결 문제"
+  category: "database"
+  service: "rds"
+  severity: "critical"
+  tags: ["rds", "failover", "multi-az", "dns", "ha"]
+  source_refs:
+    - title: "RDS Multi-AZ Failover"
+      url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/Concepts.MultiAZ.html"
+      type: "official_doc"
+    - title: "RDS Failover Process"
+      url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_MultiAZFailover.html"
+      type: "official_doc"
+
+triggers:
+  - type: "event_bridge"
+    description: "RDS 장애 조치 이벤트"
+    condition: "source=rds AND detail-type='RDS DB Instance Event' AND detail.EventCategories contains 'failover'"
+
+symptoms:
+  - id: "s1"
+    description: "DB 연결 끊김 및 재연결 실패"
+    detection_method: "애플리케이션 로그"
+  - id: "s2"
+    description: "DNS 해석이 이전 프라이머리를 가리킴"
+    detection_method: "nslookup 또는 dig로 엔드포인트 확인"
+    cli: "nslookup <RDS_ENDPOINT>"
+  - id: "s3"
+    description: "DatabaseConnections 급감 후 복구"
+    detection_method: "CloudWatch Metrics"
+
+diagnosis:
+  decision_tree:
+    - step: 1
+      question: "페일오버가 완료되었는가?"
+      check:
+        cli: "aws rds describe-db-instances --db-instance-identifier <INSTANCE> --query 'DBInstances[0].DBInstanceStatus'"
+      branches:
+        - condition: "Status = 'available'"
+          result: "FAILOVER-COMPLETE"
+          next_step: 2
+        - condition: "Status = 'modifying' or 'backing-up'"
+          result: "FAILOVER-IN-PROGRESS"
+          next_step: 0
+    - step: 2
+      question: "애플리케이션이 새 엔드포인트에 연결되었는가?"
+      check:
+        cli: "애플리케이션 로그에서 연결 에러 확인"
+      branches:
+        - condition: "연결 에러 지속"
+          result: "DNS-PROPAGATION"
+          next_step: 0
+        - condition: "연결 정상"
+          result: "FAILOVER-OK"
+          next_step: 0
+
+root_causes:
+  - code: "FAILOVER-COMPLETE"
+    name: "페일오버 완료 후 DNS 전파 지연"
+    description: "클라이언트 DNS 캐시가 이전 IP를 유지"
+    probability: "high"
+    related_symptoms: ["s1", "s2"]
+  - code: "FAILOVER-IN-PROGRESS"
+    name: "페일오버 진행 중"
+    description: "장애 조치가 아직 완료되지 않음 (60-120초 소요)"
+    probability: "medium"
+    related_symptoms: ["s1"]
+
+remediation:
+  - root_cause_code: "FAILOVER-COMPLETE"
+    actions:
+      - order: 1
+        name: "DNS 캐시 플러시 및 연결 재시도 안내"
+        type: "manual"
+        command: "애플리케이션의 DNS 캐시 TTL 확인, 연결 풀 리셋 안내"
+        rollback_command: |
+          # DNS 캐시 플러시는 되돌릴 필요 없음 — 자연적으로 TTL에 따라 갱신됨
+        risk: "low"
+        requires_approval: false
+        estimated_impact:
+          cost: "없음"
+          duration: "DNS TTL 만료 후 즉시 (RDS 엔드포인트 TTL 5초)"
+          blast_radius: "없음 — 진단/안내 작업"
+      - order: 2
+        name: "연결 풀 리사이클"
+        type: "manual"
+        command: "애플리케이션 재시작 또는 연결 풀 강제 리사이클"
+        rollback_command: |
+          # 애플리케이션 재시작 롤백 불필요 — 재시작 자체가 복구 수단
+          # ECS: aws ecs update-service --cluster <CLUSTER> --service <SERVICE> --force-new-deployment
+        risk: "medium"
+        requires_approval: true
+        estimated_impact:
+          cost: "없음"
+          duration: "ECS 롤링 재시작 5-10분, Lambda 연결 풀은 즉시"
+          blast_radius: "재시작 중 일시적 처리 용량 감소 — 트래픽 스파이크 시 주의"
+
+  - root_cause_code: "FAILOVER-IN-PROGRESS"
+    actions:
+      - order: 1
+        name: "페일오버 완료 대기"
+        type: "aws_cli"
+        command: "aws rds wait db-instance-available --db-instance-identifier <INSTANCE>"
+        rollback_command: |
+          # 대기 작업은 롤백 불필요 — 취소 시 Ctrl+C 후 상태 재확인
+        risk: "low"
+        requires_approval: false
+        estimated_impact:
+          cost: "없음"
+          duration: "RDS Multi-AZ 페일오버 완료까지 60-120초 추가 대기"
+          blast_radius: "없음 — 폴링 전용"
+
+guardrails:
+  pre_conditions:
+    - description: "페일오버 완료 여부 확인 — 진행 중에는 추가 조작 금지"
+      check: "aws rds describe-db-instances --db-instance-identifier <INSTANCE> --query 'DBInstances[0].DBInstanceStatus' = 'available'"
+      block: true
+    - description: "연결 풀 리사이클 전 서비스 트래픽 영향 최소화 방안 확인"
+      check: "애플리케이션 재시작 시 in-flight 요청 처리 방안 수립 (graceful shutdown 설정 확인)"
+      block: false
+  post_conditions:
+    - description: "새 프라이머리에 연결 가능"
+      check: "애플리케이션 연결 정상"
+      auto_rollback: false
+
+verification:
+  checks:
+    - name: "DB 연결 정상"
+      method: "애플리케이션 헬스체크"
+      expected: "연결 성공, 쿼리 응답 정상"
+    - name: "엔드포인트 DNS 해석"
+      method: "DNS 확인"
+      expected: "새 프라이머리 IP로 해석"
+  stability_window: 300
+  success_criteria: "애플리케이션 DB 연결 정상, 쿼리 응답 정상"
+
+escalation:
+  auto_remediate: false
+  approval_required: false
+  escalation_timeout: 300
+  notify: ["oncall", "dba"]

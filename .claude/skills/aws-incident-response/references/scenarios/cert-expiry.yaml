@@ -1,0 +1,172 @@
+schema: decision-knowledge-record/v1
+
+metadata:
+  id: "cert-expiry"
+  name: "ACM/TLS 인증서 만료"
+  description: "ACM 인증서가 만료되어 HTTPS 서비스 접속 불가"
+  category: "security"
+  service: "acm"
+  severity: "high"
+  tags: ["acm", "certificate", "tls", "https", "expired"]
+  source_refs:
+    - title: "ACM Certificate Renewal"
+      url: "https://docs.aws.amazon.com/acm/latest/userguide/dns-validation.html"
+      type: "official_doc"
+    - title: "CloudFront TLS (re:Post)"
+      url: "https://repost.aws/knowledge-center/cloudfront-troubleshoot-403-errors"
+      type: "repost_kc"
+
+triggers:
+  - type: "metric_threshold"
+    description: "HTTPS 연결 실패 증가"
+    condition: "ALB/CWFront 5xx 또 브라우저 인증서 오류"
+
+symptoms:
+  - id: "s1"
+    description: "NET::ERR_CERT_DATE_INVALID 브라우저 오류"
+    detection_method: "브라우저 콘솔"
+  - id: "s2"
+    description: "ACM 인증서 상태 EXPIRED"
+    detection_method: "ACM API"
+    cli: "aws acm describe-certificate --certificate-arn <CERT_ARN> --query 'Certificate.Status'"
+
+diagnosis:
+  decision_tree:
+    - step: 1
+      question: "인증서가 만료되었는가?"
+      check:
+        cli: "aws acm describe-certificate --certificate-arn <CERT_ARN>"
+      branches:
+        - condition: "Status = EXPIRED"
+          result: "CERT-EXPIRED"
+          next_step: 0
+        - condition: "Status = FAILED"
+          result: "CERT-VALIDATION-FAILED"
+          next_step: 0
+        - condition: "Status = ISSUED"
+          result: "CERT-NOT-EXPIRED"
+          next_step: 0
+
+root_causes:
+  - code: "CERT-EXPIRED"
+    name: "인증서 만료"
+    description: "ACM 인증서가 갱신되지 않아 만료됨"
+    probability: "high"
+  - code: "CERT-VALIDATION-FAILED"
+    name: "DNS 검증 실패"
+    description: "DNS 검증 레코드가 누락되어 인증서 갱신 불가"
+    probability: "medium"
+
+remediation:
+  - root_cause_code: "CERT-EXPIRED"
+    actions:
+      - order: 1
+        name: "인증서 갱신 요청"
+        type: "aws_cli"
+        command: |
+          aws acm request-certificate --domain-name <DOMAIN> \
+            --validation-method DNS \
+            --subject-alternative-names <SAN_NAMES>
+        rollback_command: |
+          aws acm delete-certificate --certificate-arn <NEW_CERT_ARN>
+        risk: "low"
+        requires_approval: false
+        estimated_impact:
+          cost: "ACM 인증서 자체는 무료 (단, CloudFront/ALB에서 사용 시 서비스 요금 유지)"
+          duration: "DNS 전파 후 최대 30분 (자동 DNS 검증 시)"
+          blast_radius: "새 ARN으로 CloudFront/ALB 업데이트 전까지 기존 만료 인증서 유지"
+      - order: 2
+        name: "CloudFront에 새 인증서 배포"
+        type: "aws_cli"
+        command: |
+          aws cloudfront get-distribution-config --id <DIST_ID> --query 'DistributionConfig' > /tmp/dist-config.json
+          # dist-config.json에서 ViewerCertificate.ACMCertificateArn을 새 ARN으로 수정 후:
+          aws cloudfront update-distribution --id <DIST_ID> \
+            --distribution-config file:///tmp/dist-config.json \
+            --if-match <ETAG>
+        rollback_command: |
+          aws cloudfront update-distribution --id <DIST_ID> \
+            --distribution-config file:///tmp/dist-config-backup.json \
+            --if-match <CURRENT_ETAG>
+        risk: "medium"
+        requires_approval: true
+        estimated_impact:
+          cost: "변경 없음 (CloudFront 배포 자체 비용 구조 유지)"
+          duration: "CloudFront 배포 전파 최대 15분"
+          blast_radius: "배포 전파 중 일부 엣지 로케이션에서 일시적 인증서 불일치 가능"
+
+  - root_cause_code: "CERT-VALIDATION-FAILED"
+    actions:
+      - order: 1
+        name: "DNS 검증 레코드 추가"
+        type: "aws_cli"
+        command: |
+          # ACM에서 요구하는 CNAME 레코드 확인
+          aws acm describe-certificate --certificate-arn <CERT_ARN> \
+            --query 'Certificate.DomainValidationOptions[*].ResourceRecord'
+          # Route 53에 CNAME 레코드 자동 추가
+          aws route53 change-resource-record-sets --hosted-zone-id <ZONE_ID> \
+            --change-batch '{
+              "Changes": [{
+                "Action": "UPSERT",
+                "ResourceRecordSet": {
+                  "Name": "<CNAME_NAME>",
+                  "Type": "CNAME",
+                  "TTL": 300,
+                  "ResourceRecords": [{"Value": "<CNAME_VALUE>"}]
+                }
+              }]
+            }'
+        rollback_command: |
+          aws route53 change-resource-record-sets --hosted-zone-id <ZONE_ID> \
+            --change-batch '{"Changes":[{"Action":"DELETE","ResourceRecordSet":{"Name":"<CNAME_NAME>","Type":"CNAME","TTL":300,"ResourceRecords":[{"Value":"<CNAME_VALUE>"}]}}]}'
+        risk: "low"
+        requires_approval: false
+        estimated_impact:
+          cost: "Route 53 레코드 변경 비용 미미 ($0.0015/레코드)"
+          duration: "DNS TTL 기준 전파 시간 + ACM 검증 최대 30분"
+          blast_radius: "DNS 레코드 변경만이므로 서비스 영향 없음"
+
+guardrails:
+  pre_conditions:
+    - description: "현재 인증서 상태 및 만료일 확인"
+      check: "aws acm describe-certificate --certificate-arn <CERT_ARN> --query 'Certificate.[Status,NotAfter]'"
+      block: false
+    - description: "DNS 레코드 편집 권한 및 Route 53 호스팅 영역 접근 확인"
+      check: "aws route53 list-hosted-zones --query 'HostedZones[?Name==`<DOMAIN>.`].Id'"
+      block: true
+  post_conditions:
+    - description: "인증서 상태 ISSUED 확인"
+      check: "aws acm describe-certificate --certificate-arn <CERT_ARN> --query 'Certificate.Status'"
+      auto_rollback: false
+
+verification:
+  checks:
+    - name: "HTTPS 정상"
+      method: "CloudWatch Metrics"
+      expected: "인증서 오류 소멸, HTTPS 정상 연결"
+      metric:
+        namespace: "AWS/ApplicationELB"
+        metric_name: "ClientTLSNegotiationErrorCount"
+        statistic: "Sum"
+        threshold: "= 0"
+    - name: "인증서 상태 ISSUED"
+      method: "AWS CLI"
+      expected: "Certificate.Status = ISSUED"
+      cli: "aws acm describe-certificate --certificate-arn <CERT_ARN> --query 'Certificate.Status'"
+    - name: "CloudFront 5xx 에러율 정상"
+      method: "CloudWatch Metrics"
+      expected: "5xxErrorRate < 0.1%"
+      metric:
+        namespace: "AWS/CloudFront"
+        metric_name: "5xxErrorRate"
+        statistic: "Average"
+        threshold: "< 0.001"
+  stability_window: 300
+  success_criteria: "HTTPS 정상 연결, 인증서 ISSUED"
+
+escalation:
+  auto_remediate: false
+  approval_required: false
+  escalation_timeout: 300
+  notify: ["oncall"]

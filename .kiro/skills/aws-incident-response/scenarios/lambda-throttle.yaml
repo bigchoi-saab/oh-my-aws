@@ -1,0 +1,595 @@
+schema: "decision-knowledge-record/v1"
+
+metadata:
+  id: lambda-throttle
+  name: Lambda Function Throttling
+  description: >
+    Diagnose and remediate AWS Lambda throttling events where invocations are
+    rejected with TooManyRequestsException (HTTP 429). Covers account-level
+    concurrency limits, function reserved-concurrency caps, burst scaling
+    limits, event-source bottlenecks, and poison-pill message storms.
+  category: compute
+  service: lambda
+  severity: high
+  tags:
+    - lambda
+    - throttling
+    - concurrency
+    - TooManyRequestsException
+    - sqs
+    - event-source
+    - burst-scaling
+  source_refs:
+    - title: "AWS Lambda – Understanding and managing function concurrency"
+      url: "https://docs.aws.amazon.com/lambda/latest/dg/lambda-concurrency.html"
+      type: official_doc
+    - title: "AWS Lambda – Function scaling"
+      url: "https://docs.aws.amazon.com/lambda/latest/dg/invocation-scaling.html"
+      type: official_doc
+    - title: "AWS Lambda – Troubleshooting issues in Lambda"
+      url: "https://docs.aws.amazon.com/lambda/latest/dg/lambda-troubleshooting.html"
+      type: troubleshooting_guide
+    - title: "AWS Lambda – Using Lambda with Amazon SQS"
+      url: "https://docs.aws.amazon.com/lambda/latest/dg/with-sqs.html"
+      type: official_doc
+    - title: "AWS Well-Architected Framework – Serverless Lens"
+      url: "https://docs.aws.amazon.com/wellarchitected/latest/serverless-applications-lens/welcome.html"
+      type: well_architected
+    - title: "AWS re:Post – Why is my Lambda function being throttled?"
+      url: "https://repost.aws/knowledge-center/lambda-function-throttling"
+      type: repost_kc
+    - title: "Service Quotas – Lambda concurrent executions"
+      url: "https://docs.aws.amazon.com/general/latest/gr/lambda-service.html"
+      type: official_doc
+
+triggers:
+  - type: metric_threshold
+    description: Lambda Throttles metric exceeds zero over a 1-minute evaluation window
+    condition: "AWS/Lambda:Throttles[Sum,60s] > 0"
+    metrics:
+      - namespace: AWS/Lambda
+        metric_name: Throttles
+        statistic: Sum
+        period: 60
+        threshold: 0
+        comparison_operator: GreaterThanThreshold
+  - type: metric_threshold
+    description: Account-level ConcurrentExecutions approaches account quota
+    condition: "AWS/Lambda:ConcurrentExecutions[Max,60s] >= AccountQuota * 0.9"
+    metrics:
+      - namespace: AWS/Lambda
+        metric_name: ConcurrentExecutions
+        statistic: Maximum
+        period: 60
+        threshold: 900
+        comparison_operator: GreaterThanOrEqualToThreshold
+  - type: log_pattern
+    description: TooManyRequestsException or Rate exceeded in function logs
+    condition: "@message like /TooManyRequestsException|Rate exceeded/"
+    metrics: []
+
+symptoms:
+  - id: SYM-THR-01
+    description: "HTTP 429 TooManyRequestsException returned to callers"
+    detection_method: "CloudWatch Metrics – Lambda Throttles > 0"
+  - id: SYM-THR-02
+    description: "Rate exceeded message in CloudWatch Logs"
+    detection_method: >
+      CloudWatch Logs Insights query:
+      fields @timestamp, @requestId, @message
+      | filter @message like "Rate exceeded"
+      | sort @timestamp desc
+      | limit 100
+  - id: SYM-THR-03
+    description: "ConcurrentExecutions approaching account or function limit"
+    detection_method: "CloudWatch Metrics – ConcurrentExecutions near AccountQuota or ReservedConcurrentExecutions"
+  - id: SYM-THR-04
+    description: "Burst stair-step pattern: rapid Invocations spike followed by Throttles"
+    detection_method: "CloudWatch Metrics – Invocations burst then Throttles increase within same minute"
+  - id: SYM-THR-05
+    description: "SQS queue depth growing – ApproximateNumberOfMessagesVisible increasing"
+    detection_method: "CloudWatch Metrics – AWS/SQS ApproximateNumberOfMessagesVisible rising"
+  - id: SYM-THR-06
+    description: "Poison-pill messages causing repeated invocation failures and DLQ growth"
+    detection_method: "CloudWatch Metrics – DeadLetterErrors > 0 or SQS DLQ ApproximateNumberOfMessagesVisible increasing"
+
+diagnosis:
+  decision_tree:
+    - step: 1
+      question: "Is the Throttles metric > 0 for this function?"
+      check:
+        cli: >
+          aws cloudwatch get-metric-statistics
+            --namespace AWS/Lambda
+            --metric-name Throttles
+            --dimensions Name=FunctionName,Value=<function-name>
+            --start-time $(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+            --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ)
+            --period 300
+            --statistics Sum
+        metric: "AWS/Lambda Throttles Sum over 5 minutes"
+      branches:
+        - condition: "Throttles Sum == 0"
+          result: "Not a throttling event – investigate timeout or error scenario"
+        - condition: "Throttles Sum > 0"
+          result: "Confirmed throttling – proceed to step 2"
+          next_step: 2
+
+    - step: 2
+      question: "Is ConcurrentExecutions at or near the account-level concurrency quota?"
+      check:
+        cli: >
+          aws lambda get-account-settings
+          # Compare TotalConcurrentExecutions vs ConcurrentExecutions metric
+        metric: "AWS/Lambda ConcurrentExecutions Maximum vs AccountQuota"
+      branches:
+        - condition: "ConcurrentExecutions >= AccountQuota * 0.9"
+          result: "THROTTLE-ACCT – account-level limit reached"
+        - condition: "ConcurrentExecutions < AccountQuota * 0.9"
+          result: "Account limit not the cause – proceed to step 3"
+          next_step: 3
+
+    - step: 3
+      question: "Does the throttled function have a Reserved Concurrency setting?"
+      check:
+        cli: >
+          aws lambda get-function-concurrency
+            --function-name <function-name>
+        api: "GetFunctionConcurrency → ReservedConcurrentExecutions"
+      branches:
+        - condition: "ReservedConcurrentExecutions is set AND only this function shows Throttles"
+          result: "THROTTLE-RESV – function-level reserved concurrency cap"
+        - condition: "ReservedConcurrentExecutions is null or other functions also throttle"
+          result: "Reserved concurrency not the cause – proceed to step 4"
+          next_step: 4
+
+    - step: 4
+      question: "Did Invocations spike sharply (burst pattern) within a short window?"
+      check:
+        metric: "AWS/Lambda Invocations Sum over 1-minute periods for the past 10 minutes"
+        cli: >
+          aws cloudwatch get-metric-statistics
+            --namespace AWS/Lambda
+            --metric-name Invocations
+            --dimensions Name=FunctionName,Value=<function-name>
+            --start-time $(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+            --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ)
+            --period 60
+            --statistics Sum
+      branches:
+        - condition: "Invocations increased >1000 within first 10 seconds then Throttles followed"
+          result: "THROTTLE-BURST – burst scaling limit (initial 1000, +500/min)"
+        - condition: "No burst pattern detected"
+          result: "Burst not the cause – proceed to step 5"
+          next_step: 5
+
+    - step: 5
+      question: "Is an SQS or DynamoDB Stream event source mapped to this function with queue/stream depth growing?"
+      check:
+        cli: >
+          aws lambda list-event-source-mappings
+            --function-name <function-name>
+          # Then check SQS: aws sqs get-queue-attributes --attribute-names ApproximateNumberOfMessages
+        metric: "AWS/SQS ApproximateNumberOfMessagesVisible"
+      branches:
+        - condition: "Event source mapping exists AND queue depth increasing AND no poison messages"
+          result: "THROTTLE-SRC – event source concurrency bottleneck"
+        - condition: "Event source mapping exists AND same messages repeatedly failing AND DLQ growing"
+          result: "THROTTLE-POISON – poison-pill message retry storm"
+
+root_causes:
+  - code: THROTTLE-ACCT
+    name: Account-Level Concurrent Execution Limit Reached
+    description: >
+      The total ConcurrentExecutions across all functions in the AWS account
+      reached the account quota (default 1000). All new invocations in the
+      account are throttled until in-flight executions complete.
+    probability: medium
+    related_symptoms:
+      - SYM-THR-01
+      - SYM-THR-03
+
+  - code: THROTTLE-RESV
+    name: Function Reserved Concurrency Cap
+    description: >
+      A ReservedConcurrentExecutions setting on the specific function is set
+      too low relative to incoming traffic. Only this function throttles while
+      the rest of the account may have available concurrency.
+    probability: high
+    related_symptoms:
+      - SYM-THR-01
+      - SYM-THR-02
+      - SYM-THR-03
+
+  - code: THROTTLE-BURST
+    name: Burst Scaling Rate Limit
+    description: >
+      Lambda can scale from 0 to 1000 concurrent executions instantly, then
+      adds 500 per minute thereafter. A sudden traffic spike exceeding this
+      ramp rate causes throttling until scaling catches up.
+    probability: medium
+    related_symptoms:
+      - SYM-THR-01
+      - SYM-THR-04
+
+  - code: THROTTLE-SRC
+    name: Event Source Mapping Concurrency Bottleneck
+    description: >
+      An SQS or DynamoDB Streams event source mapping drives more concurrent
+      invocations than the function or account allows. Increasing batch size
+      or SQS MaximumConcurrency parameter can smooth the load.
+    probability: high
+    related_symptoms:
+      - SYM-THR-01
+      - SYM-THR-05
+
+  - code: THROTTLE-POISON
+    name: Poison-Pill Message Retry Storm
+    description: >
+      One or more malformed messages repeatedly fail processing, are returned
+      to the queue, and immediately retried. Each retry cycle consumes
+      concurrency and can throttle legitimate messages.
+    probability: medium
+    related_symptoms:
+      - SYM-THR-01
+      - SYM-THR-05
+      - SYM-THR-06
+
+remediation:
+  - root_cause_code: THROTTLE-ACCT
+    actions:
+      - order: 1
+        name: Request account concurrency quota increase via Service Quotas
+        description: >
+          Submit a quota increase request for "Concurrent executions" in AWS
+          Service Quotas. This is an AWS-side change and may take hours to days.
+        type: manual
+        command: >
+          aws service-quotas request-service-quota-increase
+            --service-code lambda
+            --quota-code L-B99A9384
+            --desired-value 3000
+        rollback_command: >
+          # Quota increases cannot be automatically rolled back.
+          # Contact AWS Support to reduce if needed.
+          aws service-quotas list-requested-service-quota-changes-by-service \
+            --service-code lambda
+        risk: low
+        requires_approval: true
+        estimated_impact: "No cost impact; quota increase approved by AWS within SLA"
+      - order: 2
+        name: Add SQS buffer in front of the function to absorb traffic spikes
+        description: >
+          Decouple the event source with an SQS queue so Lambda consumes at a
+          controlled rate rather than being invoked directly at peak load.
+        type: aws_cli
+        command: >
+          # Create queue, then add event source mapping with concurrency cap
+          aws lambda create-event-source-mapping
+            --function-name <function-name>
+            --event-source-arn arn:aws:sqs:<region>:<account>:<queue-name>
+            --batch-size 10
+            --scaling-config '{"MaximumConcurrency": 100}'
+        rollback_command: >
+          aws lambda delete-event-source-mapping
+            --uuid <event-source-mapping-uuid>
+        risk: medium
+        requires_approval: true
+        estimated_impact: "Added SQS costs (~$0.40/million messages); latency increases slightly"
+
+  - root_cause_code: THROTTLE-RESV
+    actions:
+      - order: 1
+        name: Increase Reserved Concurrency for the function
+        description: >
+          Raise the ReservedConcurrentExecutions value to allow more parallel
+          invocations. Ensure the new value does not starve other critical
+          functions in the account.
+        type: aws_cli
+        command: >
+          aws lambda put-function-concurrency
+            --function-name <function-name>
+            --reserved-concurrent-executions 100
+        rollback_command: >
+          aws lambda put-function-concurrency
+            --function-name <function-name>
+            --reserved-concurrent-executions <previous-value>
+        risk: low
+        requires_approval: false
+        estimated_impact: "Consumes up to 100 units from account concurrency pool"
+      - order: 2
+        name: Add Provisioned Concurrency to eliminate cold-start contribution to throttles
+        description: >
+          Pre-warm a set number of execution environments so they are always
+          ready, reducing the time to scale and the chance of throttling on
+          initial burst.
+        type: aws_cli
+        command: >
+          aws lambda put-provisioned-concurrency-config
+            --function-name <function-name>
+            --qualifier <alias-or-version>
+            --provisioned-concurrent-executions 50
+        rollback_command: >
+          aws lambda delete-provisioned-concurrency-config
+            --function-name <function-name>
+            --qualifier <alias-or-version>
+        risk: medium
+        requires_approval: true
+        estimated_impact: >
+          Cost: PC_count × memory_GB × $0.0000041667/GB-second × seconds_per_month.
+          Example: 50 × 0.128 GB × $0.0000041667 × 2592000 ≈ $69/month
+
+  - root_cause_code: THROTTLE-BURST
+    actions:
+      - order: 1
+        name: Buffer traffic with SQS queue and controlled event-source concurrency
+        description: >
+          Place an SQS queue between the event producer and the Lambda function.
+          Set MaximumConcurrency on the event source mapping to stay within the
+          burst limit and let Lambda scale gradually.
+        type: aws_cli
+        command: >
+          aws lambda create-event-source-mapping
+            --function-name <function-name>
+            --event-source-arn arn:aws:sqs:<region>:<account>:<queue-name>
+            --batch-size 10
+            --maximum-batching-window-in-seconds 5
+            --scaling-config '{"MaximumConcurrency": 200}'
+        rollback_command: >
+          aws lambda delete-event-source-mapping
+            --uuid <event-source-mapping-uuid>
+        risk: medium
+        requires_approval: true
+        estimated_impact: "Smooths traffic; adds queue latency of up to batching-window seconds"
+      - order: 2
+        name: Request concurrency quota increase to raise burst ceiling
+        description: >
+          The initial burst pool is regional. A higher account quota increases
+          the absolute burst ceiling available to the function.
+        type: manual
+        command: >
+          aws service-quotas request-service-quota-increase
+            --service-code lambda
+            --quota-code L-B99A9384
+            --desired-value 3000
+        rollback_command: >
+          # Not reversible automatically; contact AWS Support.
+          echo "Open AWS Support case to adjust quota if needed"
+        risk: low
+        requires_approval: true
+        estimated_impact: "No direct cost; allows higher burst headroom"
+
+  - root_cause_code: THROTTLE-SRC
+    actions:
+      - order: 1
+        name: Set MaximumConcurrency on the SQS event source mapping
+        description: >
+          Cap the number of concurrent Lambda invocations driven by the SQS
+          poller using the scaling-config MaximumConcurrency parameter
+          (2–1000, in steps of 2).
+        type: aws_cli
+        command: >
+          aws lambda update-event-source-mapping
+            --uuid <event-source-mapping-uuid>
+            --scaling-config '{"MaximumConcurrency": 5}'
+        rollback_command: >
+          aws lambda update-event-source-mapping
+            --uuid <event-source-mapping-uuid>
+            --scaling-config '{"MaximumConcurrency": <previous-value>}'
+        risk: low
+        requires_approval: false
+        estimated_impact: "Limits Lambda concurrency from this source; queue depth may grow temporarily"
+      - order: 2
+        name: Configure Provisioned Pollers for consistent throughput
+        description: >
+          Set minimum and maximum SQS pollers to prevent under-polling and
+          sudden scaling spikes that cause throttling.
+        type: aws_cli
+        command: >
+          aws lambda update-event-source-mapping
+            --uuid <event-source-mapping-uuid>
+            --provisioned-poller-config '{"MinimumPollers": 5, "MaximumPollers": 100}'
+        rollback_command: >
+          aws lambda update-event-source-mapping
+            --uuid <event-source-mapping-uuid>
+            --provisioned-poller-config '{"MinimumPollers": 1, "MaximumPollers": 200}'
+        risk: low
+        requires_approval: false
+        estimated_impact: "Stabilises polling rate; minimal additional cost for provisioned pollers"
+
+  - root_cause_code: THROTTLE-POISON
+    actions:
+      - order: 1
+        name: Enable Partial Batch Response (ReportBatchItemFailures)
+        description: >
+          Instead of failing the entire batch when one message fails, return
+          only the failed message IDs in batchItemFailures. Lambda will retry
+          only those messages, preventing good messages from being blocked.
+        type: aws_cli
+        command: >
+          aws lambda update-event-source-mapping
+            --uuid <event-source-mapping-uuid>
+            --function-response-types ReportBatchItemFailures
+        rollback_command: >
+          aws lambda update-event-source-mapping
+            --uuid <event-source-mapping-uuid>
+            --function-response-types '[]'
+        risk: low
+        requires_approval: false
+        estimated_impact: "Requires function code to return batchItemFailures structure; no cost change"
+      - order: 2
+        name: Configure SQS Dead Letter Queue with maxReceiveCount
+        description: >
+          After maxReceiveCount failed attempts, SQS moves the message to the
+          DLQ automatically. This stops the retry storm and isolates the
+          poison message for investigation.
+        type: aws_cli
+        command: >
+          # Create DLQ
+          aws sqs create-queue --queue-name <function-name>-dlq
+
+          # Set redrive policy on the source queue
+          aws sqs set-queue-attributes
+            --queue-url https://sqs.<region>.amazonaws.com/<account>/<queue-name>
+            --attributes '{
+              "RedrivePolicy": "{\"deadLetterTargetArn\":\"arn:aws:sqs:<region>:<account>:<function-name>-dlq\",\"maxReceiveCount\":\"5\"}"
+            }'
+        rollback_command: >
+          aws sqs set-queue-attributes
+            --queue-url https://sqs.<region>.amazonaws.com/<account>/<queue-name>
+            --attributes '{"RedrivePolicy": ""}'
+        risk: low
+        requires_approval: false
+        estimated_impact: "Poison messages routed to DLQ after 5 attempts; alerts on DLQ depth recommended"
+
+guardrails:
+  pre_conditions:
+    - description: "Verify Throttles metric is actually > 0 before any concurrency change"
+      check: >
+        aws cloudwatch get-metric-statistics
+          --namespace AWS/Lambda --metric-name Throttles
+          --dimensions Name=FunctionName,Value=<function-name>
+          --start-time <5-min-ago> --end-time <now>
+          --period 300 --statistics Sum
+        → Sum > 0
+      block: true
+
+    - description: "Confirm reserved concurrency will not be set to 0 (blocks all invocations)"
+      check: "reservedConcurrentExecutions value in update command is NOT 0"
+      block: true
+
+    - description: "Check account-level concurrency budget before increasing reserved concurrency"
+      check: >
+        aws lambda get-account-settings
+        → TotalConcurrentExecutions < (AccountLimit - sum of other reserved concurrency)
+      block: false
+
+    - description: "Calculate and display Provisioned Concurrency monthly cost before enabling"
+      check: >
+        cost = PC_count × (memory_MB / 1024) × 0.0000041667 × 2592000
+        Display cost estimate to operator for approval
+      block: true
+
+    - description: "Ensure SQS event source mapping UUID is correct before update"
+      check: >
+        aws lambda list-event-source-mappings --function-name <function-name>
+        → UUID matches target mapping
+      block: true
+
+    - description: "Verify function code returns batchItemFailures structure before enabling ReportBatchItemFailures"
+      check: "Function handler returns { batchItemFailures: [...] } on partial failure"
+      block: false
+
+  post_conditions:
+    - description: "Throttles metric returns to 0 within 5 minutes of remediation"
+      check: >
+        aws cloudwatch get-metric-statistics
+          --namespace AWS/Lambda --metric-name Throttles
+          --dimensions Name=FunctionName,Value=<function-name>
+          --start-time <now-5m> --end-time <now>
+          --period 300 --statistics Sum
+        → Sum == 0
+      auto_rollback: false
+
+    - description: "Error rate must not increase after remediation (roll back if errors rise)"
+      check: >
+        aws cloudwatch get-metric-statistics
+          --namespace AWS/Lambda --metric-name Errors
+          --dimensions Name=FunctionName,Value=<function-name>
+          --start-time <now-5m> --end-time <now>
+          --period 300 --statistics Sum
+        → Sum <= baseline_error_count
+      auto_rollback: true
+
+    - description: "ConcurrentExecutions must stay below 70% of AccountQuota after change"
+      check: >
+        ConcurrentExecutions (Maximum, last 5 min) < AccountQuota × 0.7
+      auto_rollback: false
+
+verification:
+  checks:
+    - name: Throttles resolved
+      method: "CloudWatch Metrics – AWS/Lambda Throttles Sum over 5-minute window"
+      success_criteria: "Throttles Sum == 0 for at least two consecutive 1-minute periods"
+      cli: >
+        aws cloudwatch get-metric-statistics
+          --namespace AWS/Lambda --metric-name Throttles
+          --dimensions Name=FunctionName,Value=<function-name>
+          --start-time $(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+          --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          --period 60 --statistics Sum
+
+    - name: ConcurrentExecutions headroom
+      method: "CloudWatch Metrics – AWS/Lambda ConcurrentExecutions Maximum"
+      success_criteria: "ConcurrentExecutions Maximum < AccountQuota × 0.70"
+      cli: >
+        aws cloudwatch get-metric-statistics
+          --namespace AWS/Lambda --metric-name ConcurrentExecutions
+          --start-time $(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+          --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          --period 60 --statistics Maximum
+
+    - name: SQS queue depth draining
+      method: "CloudWatch Metrics – AWS/SQS ApproximateNumberOfMessagesVisible"
+      success_criteria: "Queue depth stable or decreasing over 5-minute window"
+      cli: >
+        aws cloudwatch get-metric-statistics
+          --namespace AWS/SQS
+          --metric-name ApproximateNumberOfMessagesVisible
+          --dimensions Name=QueueName,Value=<queue-name>
+          --start-time $(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+          --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          --period 60 --statistics Maximum
+
+    - name: DLQ healthy
+      method: "CloudWatch Metrics – AWS/SQS ApproximateNumberOfMessagesVisible on DLQ"
+      success_criteria: "DLQ depth == 0 or not increasing (poison-pill scenario resolved)"
+      cli: >
+        aws cloudwatch get-metric-statistics
+          --namespace AWS/SQS
+          --metric-name ApproximateNumberOfMessagesVisible
+          --dimensions Name=QueueName,Value=<function-name>-dlq
+          --start-time $(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+          --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          --period 60 --statistics Maximum
+
+    - name: SQS messages being processed
+      method: "CloudWatch Metrics – AWS/SQS NumberOfMessagesDeleted"
+      success_criteria: "NumberOfMessagesDeleted > 0 in last 5 minutes (queue actively draining)"
+      cli: >
+        aws cloudwatch get-metric-statistics
+          --namespace AWS/SQS
+          --metric-name NumberOfMessagesDeleted
+          --dimensions Name=QueueName,Value=<queue-name>
+          --start-time $(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+          --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          --period 300 --statistics Sum
+
+    - name: Provisioned Concurrency spillover
+      method: "CloudWatch Metrics – AWS/Lambda ProvisionedConcurrencySpilloverInvocations"
+      success_criteria: "ProvisionedConcurrencySpilloverInvocations close to 0"
+      cli: >
+        aws cloudwatch get-metric-statistics
+          --namespace AWS/Lambda
+          --metric-name ProvisionedConcurrencySpilloverInvocations
+          --dimensions Name=FunctionName,Value=<function-name>
+          --start-time $(date -u -d '5 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+          --end-time $(date -u +%Y-%m-%dT%H:%M:%SZ)
+          --period 60 --statistics Sum
+
+escalation:
+  auto_remediate:
+    enabled: false
+    conditions:
+      - "THROTTLE-RESV: increase reserved concurrency by 20% if Throttles > 0 for 2 consecutive minutes AND new value <= AccountQuota * 0.5"
+  approval_required:
+    - action: "Request account concurrency quota increase (THROTTLE-ACCT, THROTTLE-BURST)"
+      reason: "Irreversible AWS-side change; involves AWS Support SLA"
+    - action: "Enable Provisioned Concurrency (THROTTLE-RESV order 2)"
+      reason: "Recurring cost impact requires human cost approval"
+    - action: "Add SQS buffer event source mapping (THROTTLE-ACCT order 2, THROTTLE-BURST order 1)"
+      reason: "Architecture change affecting upstream producers and downstream consumers"
+  notify_on_escalation:
+    - "ConcurrentExecutions > AccountQuota * 0.9 for 5 consecutive minutes"
+    - "Throttles > 0 with no auto-remediation available (THROTTLE-ACCT)"
+    - "DLQ depth growing despite poison-pill remediation applied"

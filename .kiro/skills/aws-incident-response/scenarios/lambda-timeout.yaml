@@ -1,0 +1,607 @@
+schema: "decision-knowledge-record/v1"
+
+metadata:
+  id: "lambda-timeout"
+  name: "Lambda Timeout and Throttling"
+  description: >
+    Lambda function invocations fail with Task timed out or TooManyRequestsException.
+    Covers six timeout root causes (configuration gap, memory/CPU starvation, downstream
+    dependency lag, VPC routing issues, SDK timeout misalignment, cold start latency)
+    with structured diagnosis, remediation, and verification procedures.
+  category: "compute"
+  service: "lambda"
+  severity: "high"
+  tags:
+    - lambda
+    - timeout
+    - throttling
+    - cold-start
+    - latency
+    - concurrency
+    - serverless
+  source_refs:
+    - title: "Troubleshooting Lambda – Invocation Issues"
+      url: "https://docs.aws.amazon.com/lambda/latest/dg/troubleshooting-invocation.html"
+      type: "troubleshooting_guide"
+    - title: "Lambda – Configuring Timeout"
+      url: "https://docs.aws.amazon.com/lambda/latest/dg/configuration-timeout.html"
+      type: "official_doc"
+    - title: "Lambda – Provisioned Concurrency"
+      url: "https://docs.aws.amazon.com/lambda/latest/dg/provisioned-concurrency.html"
+      type: "official_doc"
+    - title: "Lambda – Lambda SnapStart"
+      url: "https://docs.aws.amazon.com/lambda/latest/dg/snapstart.html"
+      type: "official_doc"
+    - title: "Lambda – Lambda in a VPC"
+      url: "https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc.html"
+      type: "official_doc"
+    - title: "Lambda – Understanding Concurrency"
+      url: "https://docs.aws.amazon.com/lambda/latest/dg/lambda-concurrency.html"
+      type: "official_doc"
+    - title: "Well-Architected Serverless Lens – Performance Efficiency"
+      url: "https://docs.aws.amazon.com/wellarchitected/latest/serverless-applications-lens/perf-efficiency.html"
+      type: "well_architected"
+    - title: "Troubleshoot Lambda Invocation Timeouts (re:Post)"
+      url: "https://repost.aws/knowledge-center/lambda-troubleshoot-invocation-timeouts"
+      type: "repost_kc"
+    - title: "Troubleshoot Lambda Throttling (re:Post)"
+      url: "https://repost.aws/knowledge-center/lambda-troubleshoot-throttling"
+      type: "repost_kc"
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+triggers:
+  type: "log_pattern"
+  description: "Lambda log stream contains timeout error message"
+  condition: "@message like 'Task timed out' OR @message like 'Status: timeout'"
+  log_query: |
+    fields @timestamp, @requestId, @message, @logStream
+    | filter @message like "Status: timeout"
+    | sort @timestamp desc
+    | limit 100
+
+# ---------------------------------------------------------------------------
+# SYMPTOMS
+# ---------------------------------------------------------------------------
+symptoms:
+  - id: "SYM-01"
+    description: "Log line 'Task timed out after X seconds' present in function log stream"
+    detection_method: "CloudWatch Logs Insights query"
+    log_query: |
+      fields @timestamp, @requestId, @message
+      | filter @message like "Task timed out"
+      | sort @timestamp desc
+      | limit 50
+
+  - id: "SYM-02"
+    description: "Duration p95 approaching or exceeding configured timeout value"
+    detection_method: "CloudWatch Metrics – Duration p95/p99"
+    metric: "AWS/Lambda | Duration | p95 approaching FunctionTimeout"
+
+  - id: "SYM-03"
+    description: "Init Duration accounts for more than 50 percent of total execution time"
+    detection_method: "CloudWatch Logs REPORT lines – @initDuration field"
+    log_query: |
+      filter @type = "REPORT"
+      | stats max(@initDuration) as maxInit, avg(@initDuration) as avgInit, avg(@duration) as avgDuration
+      | eval initRatio = maxInit / (maxInit + avgDuration)
+
+  - id: "SYM-04"
+    description: "AsyncEventAge metric rising – asynchronous queue building up"
+    detection_method: "CloudWatch Metrics"
+    metric: "AWS/Lambda | AsyncEventAge | Maximum"
+
+  - id: "SYM-05"
+    description: "SQS IteratorAge or ApproximateAgeOfOldestMessage increasing"
+    detection_method: "CloudWatch Metrics"
+    metric: "AWS/SQS | ApproximateAgeOfOldestMessage | Maximum"
+
+  - id: "SYM-06"
+    description: "X-Ray trace shows downstream service consuming most of function duration"
+    detection_method: "AWS X-Ray service map – subsegment duration"
+    metric: "X-Ray | Subsegment ResponseTime | Max"
+
+# ---------------------------------------------------------------------------
+# DIAGNOSIS – DECISION TREE
+# ---------------------------------------------------------------------------
+diagnosis:
+  decision_tree:
+    - step: 1
+      question: "Does the log stream contain 'Task timed out' or 'Status: timeout'?"
+      check:
+        log_query: |
+          fields @timestamp, @requestId, @message
+          | filter @message like "Task timed out" OR @message like "Status: timeout"
+          | stats count() as timeoutCount by bin(5m)
+      branches:
+        - condition: "timeoutCount > 0"
+          result: "TIMEOUT_CONFIRMED"
+          next_step: 2
+        - condition: "timeoutCount = 0"
+          result: "NOT_TIMEOUT – investigate other error types"
+          next_step: 0
+
+    - step: 2
+      question: "Is Init Duration elevated (cold start)? Is Init Duration > 1s for Python/Node or > 5s for Java?"
+      check:
+        log_query: |
+          filter @type = "REPORT"
+          | stats max(@initDuration) as maxInitMs by bin(5m)
+      branches:
+        - condition: "maxInitMs > 1000 (non-Java) OR maxInitMs > 5000 (Java)"
+          result: "TIMEOUT-COLD"
+          next_step: 0
+        - condition: "initDuration absent or near 0"
+          result: "WARM_INVOCATION_TIMEOUT"
+          next_step: 3
+
+    - step: 3
+      question: "Is Duration p95 close to the configured timeout? Is p95 > 80% of FunctionTimeout?"
+      check:
+        cli: >
+          aws cloudwatch get-metric-statistics
+          --namespace AWS/Lambda
+          --metric-name Duration
+          --dimensions Name=FunctionName,Value=<FUNCTION_NAME>
+          --statistics p95
+          --period 300
+          --start-time $(date -u -d '30 minutes ago' +%FT%TZ)
+          --end-time $(date -u +%FT%TZ)
+        api: "GetFunctionConfiguration → Timeout"
+      branches:
+        - condition: "p95 > FunctionTimeout * 0.80"
+          result: "TIMEOUT-CFG candidate"
+          next_step: 4
+        - condition: "p95 < FunctionTimeout * 0.80 with spike at max"
+          result: "DOWNSTREAM_LATENCY candidate"
+          next_step: 5
+
+    - step: 4
+      question: "Is actual memory utilization above 80% of MemorySize?"
+      check:
+        log_query: |
+          filter @type = "REPORT"
+          | stats max(@maxMemoryUsed) as maxMem, max(@memorySize) as allocMem by bin(5m)
+          | eval utilPct = (maxMem / allocMem) * 100
+      branches:
+        - condition: "utilPct > 80"
+          result: "TIMEOUT-MEM"
+          next_step: 0
+        - condition: "utilPct < 80 and Duration near timeout"
+          result: "TIMEOUT-CFG"
+          next_step: 0
+
+    - step: 5
+      question: "Does X-Ray show a downstream call consuming most of the duration?"
+      check:
+        cli: >
+          aws xray get-service-graph
+          --start-time $(date -u -d '30 minutes ago' +%s)
+          --end-time $(date -u +%s)
+      branches:
+        - condition: "Downstream subsegment > 70% of total duration"
+          result: "TIMEOUT-DEP"
+          next_step: 0
+        - condition: "Function is inside a VPC and no downstream spike"
+          result: "TIMEOUT-VPC candidate"
+          next_step: 6
+        - condition: "SDK timeout settings not aligned"
+          result: "TIMEOUT-SDK candidate"
+          next_step: 0
+
+    - step: 6
+      question: "Is the function deployed inside a VPC, and is there a NAT Gateway or missing VPC Endpoint?"
+      check:
+        api: "GetFunctionConfiguration → VpcConfig"
+        cli: >
+          aws lambda get-function-configuration
+          --function-name <FUNCTION_NAME>
+          --query 'VpcConfig'
+      branches:
+        - condition: "VpcConfig.VpcId present AND VPC flow logs show dropped packets or high RTT"
+          result: "TIMEOUT-VPC"
+          next_step: 0
+        - condition: "Not in VPC"
+          result: "TIMEOUT-SDK"
+          next_step: 0
+
+# ---------------------------------------------------------------------------
+# ROOT CAUSES
+# ---------------------------------------------------------------------------
+root_causes:
+  - code: "TIMEOUT-CFG"
+    name: "Timeout configured too close to p95 execution duration"
+    description: >
+      The function's configured timeout is insufficient relative to its actual p95/p99
+      execution duration. Any variance in downstream response time causes a timeout breach.
+    probability: "high"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-02"
+
+  - code: "TIMEOUT-MEM"
+    name: "Insufficient memory causing CPU starvation and execution slowdown"
+    description: >
+      Lambda allocates CPU proportional to memory. Underprovision memory causes CPU-bound
+      workloads to run slower, pushing duration past the timeout threshold.
+    probability: "high"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-02"
+
+  - code: "TIMEOUT-DEP"
+    name: "Downstream dependency latency exceeding function timeout"
+    description: >
+      A downstream service (S3, DynamoDB, external API, RDS) responds too slowly.
+      X-Ray traces show the downstream subsegment consuming most of the function duration.
+    probability: "medium"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-02"
+      - "SYM-06"
+
+  - code: "TIMEOUT-VPC"
+    name: "VPC routing, NAT Gateway, DNS resolution, or security group misconfiguration"
+    description: >
+      Lambda inside a VPC experiences latency from missing VPC endpoints, overloaded
+      NAT Gateway, incorrect security group rules, or slow DNS resolution.
+    probability: "medium"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-02"
+
+  - code: "TIMEOUT-SDK"
+    name: "SDK connection/socket timeout exceeds Lambda function timeout"
+    description: >
+      AWS SDK or HTTP client is configured with a connection or socket timeout longer than
+      the Lambda function timeout. Lambda times out while the SDK is still waiting,
+      leaving no time for retry logic.
+    probability: "low"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-02"
+
+  - code: "TIMEOUT-COLD"
+    name: "Cold start Init Duration consuming most of the function timeout budget"
+    description: >
+      First invocation or post-idle invocation triggers function initialization. For Java
+      runtimes without SnapStart, or functions with heavy dependency trees, Init Duration
+      can exceed several seconds and consume the timeout budget before handler code runs.
+    probability: "high"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-02"
+      - "SYM-03"
+
+# ---------------------------------------------------------------------------
+# REMEDIATION
+# ---------------------------------------------------------------------------
+remediation:
+  - root_cause_code: "TIMEOUT-CFG"
+    actions:
+      - order: 1
+        name: "Increase function timeout based on p95 evidence"
+        description: >
+          Set timeout to at least p99 * 1.5 to provide headroom above the observed
+          tail latency. Maximum Lambda timeout is 900 seconds (15 minutes).
+        type: "aws_cli"
+        command: >
+          aws lambda update-function-configuration
+          --function-name <FUNCTION_NAME>
+          --timeout <NEW_TIMEOUT_SECONDS>
+        rollback_command: >
+          aws lambda update-function-configuration
+          --function-name <FUNCTION_NAME>
+          --timeout <PREVIOUS_TIMEOUT_SECONDS>
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "No additional cost. Longer running invocations billed at duration * memory."
+
+  - root_cause_code: "TIMEOUT-MEM"
+    actions:
+      - order: 1
+        name: "Increase memory allocation to gain proportional CPU"
+        description: >
+          Lambda vCPU scales linearly with memory. Doubling memory doubles CPU,
+          halving execution time for CPU-bound workloads. Start with 1.5x current value
+          then measure Duration reduction before further adjustment.
+        type: "aws_cli"
+        command: >
+          aws lambda update-function-configuration
+          --function-name <FUNCTION_NAME>
+          --memory-size <NEW_MEMORY_MB>
+        rollback_command: >
+          aws lambda update-function-configuration
+          --function-name <FUNCTION_NAME>
+          --memory-size <PREVIOUS_MEMORY_MB>
+        risk: "low"
+        requires_approval: false
+        estimated_impact: >
+          Cost per invocation = Duration_ms * MemoryGB * $0.0000166667/GB-s.
+          Higher memory increases per-invocation cost but may reduce duration enough
+          to keep total cost neutral or lower.
+
+  - root_cause_code: "TIMEOUT-DEP"
+    actions:
+      - order: 1
+        name: "Align downstream SDK timeout to Lambda timeout minus buffer"
+        description: >
+          Set the SDK-level connection timeout and read timeout to Lambda timeout - 2s
+          so the function can handle the error and return before Lambda kills it.
+        type: "code_change"
+        command: >
+          # Python boto3 example:
+          # import boto3
+          # from botocore.config import Config
+          # config = Config(connect_timeout=5, read_timeout=<LAMBDA_TIMEOUT - 2>)
+          # client = boto3.client('s3', config=config)
+          echo "Update SDK timeout in application code"
+        rollback_command: >
+          echo "Revert SDK timeout change in application code and redeploy"
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "No AWS cost impact. Requires code change and redeploy."
+      - order: 2
+        name: "Enable X-Ray active tracing to identify the slow downstream call"
+        description: >
+          Instrument function with X-Ray to pinpoint which downstream call is slow
+          before adding circuit breakers or caching.
+        type: "aws_cli"
+        command: >
+          aws lambda update-function-configuration
+          --function-name <FUNCTION_NAME>
+          --tracing-config Mode=Active
+        rollback_command: >
+          aws lambda update-function-configuration
+          --function-name <FUNCTION_NAME>
+          --tracing-config Mode=PassThrough
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "X-Ray charges $5 per million traces recorded after free tier."
+
+  - root_cause_code: "TIMEOUT-VPC"
+    actions:
+      - order: 1
+        name: "Add VPC Interface Endpoints for AWS services to avoid NAT Gateway"
+        description: >
+          Replace NAT Gateway path for AWS API calls (S3, DynamoDB, Secrets Manager, etc.)
+          with VPC Endpoints. Reduces latency and NAT Gateway data-processing charges.
+        type: "aws_cli"
+        command: >
+          aws ec2 create-vpc-endpoint
+          --vpc-id <VPC_ID>
+          --service-name com.amazonaws.<REGION>.<SERVICE>
+          --vpc-endpoint-type Interface
+          --subnet-ids <SUBNET_IDS>
+          --security-group-ids <SG_IDS>
+        rollback_command: >
+          aws ec2 delete-vpc-endpoints
+          --vpc-endpoint-ids <ENDPOINT_ID>
+        risk: "medium"
+        requires_approval: true
+        estimated_impact: >
+          VPC Interface Endpoint: ~$0.01/hour per AZ + $0.01 per GB data processed.
+          Eliminates NAT Gateway latency and data-processing cost for that service.
+      - order: 2
+        name: "Verify security group allows outbound 443 to AWS service prefix lists"
+        description: >
+          Ensure the Lambda security group has outbound TCP 443 to the target service.
+          Missing egress rules cause connection timeouts that consume function timeout budget.
+        type: "aws_cli"
+        command: >
+          aws ec2 describe-security-groups
+          --group-ids <LAMBDA_SG_ID>
+          --query 'SecurityGroups[*].IpPermissionsEgress'
+        rollback_command: >
+          echo "Remove the added security group rule if it caused unintended access"
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "No direct cost impact."
+
+  - root_cause_code: "TIMEOUT-SDK"
+    actions:
+      - order: 1
+        name: "Set SDK connection and socket timeout below Lambda function timeout"
+        description: >
+          Configure the AWS SDK and any HTTP client with explicit timeout values that are
+          strictly less than the Lambda timeout. Recommended pattern: connect_timeout=5s,
+          read_timeout = Lambda_timeout - 3s, max_attempts=2.
+        type: "code_change"
+        command: >
+          # Enable TCP keep-alive for connection reuse (Node.js):
+          # AWS_NODEJS_CONNECTION_REUSE_ENABLED=1
+          aws lambda update-function-configuration
+          --function-name <FUNCTION_NAME>
+          --environment "Variables={AWS_NODEJS_CONNECTION_REUSE_ENABLED=1}"
+        rollback_command: >
+          aws lambda update-function-configuration
+          --function-name <FUNCTION_NAME>
+          --environment "Variables={}"
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "No cost impact. Improves connection reuse and reduces latency."
+
+  - root_cause_code: "TIMEOUT-COLD"
+    actions:
+      - order: 1
+        name: "Enable SnapStart for Java 11+ runtimes (eliminates cold start)"
+        description: >
+          SnapStart snapshots the initialized execution environment and restores it on
+          invocation, reducing cold start from seconds to milliseconds for Java functions.
+          Only applies to published versions; must publish and update alias.
+        type: "aws_cli"
+        command: >
+          aws lambda update-function-configuration
+          --function-name <FUNCTION_NAME>
+          --snap-start ApplyOn=PublishedVersions &&
+          aws lambda publish-version --function-name <FUNCTION_NAME> &&
+          aws lambda update-alias
+          --function-name <FUNCTION_NAME>
+          --name <ALIAS_NAME>
+          --function-version $(aws lambda list-versions-by-function --function-name <FUNCTION_NAME> --query 'Versions[-1].Version' --output text)
+        rollback_command: >
+          aws lambda update-function-configuration
+          --function-name <FUNCTION_NAME>
+          --snap-start ApplyOn=None
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "SnapStart itself has no additional charge."
+      - order: 2
+        name: "Enable Provisioned Concurrency for non-Java or latency-sensitive functions"
+        description: >
+          Pre-initializes a set of execution environments so they are always warm.
+          Apply to a function alias. Eliminates Init Duration for up to PC_COUNT
+          concurrent invocations. Spillover beyond PC_COUNT experiences cold start.
+        type: "aws_cli"
+        command: >
+          aws lambda put-provisioned-concurrency-config
+          --function-name <FUNCTION_NAME>
+          --qualifier <ALIAS_NAME>
+          --provisioned-concurrent-executions <PC_COUNT>
+        rollback_command: >
+          aws lambda delete-provisioned-concurrency-config
+          --function-name <FUNCTION_NAME>
+          --qualifier <ALIAS_NAME>
+        risk: "medium"
+        requires_approval: true
+        estimated_impact: >
+          Monthly cost = PC_COUNT * (MemoryMB/1024) * $0.0000041667/GB-s * 2592000s.
+          Example: 5 instances * 0.5 GB * $0.0000041667 * 2592000 = ~$27/month.
+
+# ---------------------------------------------------------------------------
+# GUARDRAILS
+# ---------------------------------------------------------------------------
+guardrails:
+  pre_conditions:
+    - description: "Timeout increase must be supported by p95 Duration evidence"
+      check: >
+        Confirm Duration p95 >= current_timeout * 0.80 via CloudWatch Metrics before
+        increasing the timeout value. Increasing without evidence masks underlying issues.
+      block: true
+
+    - description: "Memory increase must be supported by actual memory utilization data"
+      check: >
+        Confirm max(@maxMemoryUsed) / @memorySize >= 0.80 from REPORT log lines before
+        increasing MemorySize. Blind memory increases raise cost without fixing root cause.
+      block: true
+
+    - description: "Provisioned Concurrency cost impact must be shown to operator before applying"
+      check: >
+        Calculate and present monthly PC cost using formula:
+        PC_COUNT * (MemoryMB/1024) * 0.0000041667 * 2592000.
+        Operator must acknowledge cost before action proceeds.
+      block: true
+
+    - description: "Reserved Concurrency must not be set to 0 (completely blocks function)"
+      check: >
+        Verify that any proposed reservedConcurrentExecutions value is > 0.
+        Setting to 0 throttles 100% of invocations immediately.
+      block: true
+
+    - description: "Account-level concurrent execution headroom must be verified before remediation"
+      check: >
+        Run: aws lambda get-account-settings --query 'AccountLimit.ConcurrentExecutions'
+        Confirm that current ConcurrentExecutions + proposed increase does not exceed account quota.
+      block: false
+
+    - description: "VPC endpoint changes must identify all shared VPC resources"
+      check: >
+        Enumerate resources sharing the target VPC and subnets before modifying
+        route tables or security groups. Changes may affect non-Lambda workloads.
+      block: false
+
+  post_conditions:
+    - description: "Duration p95 must drop below 80% of new timeout within 5-minute stability window"
+      check: "Duration p95 < new_timeout * 0.80 over 300s observation period"
+      auto_rollback: false
+
+    - description: "Error rate must not increase after remediation action"
+      check: >
+        AWS/Lambda Errors metric must not exceed pre-action baseline.
+        If Errors increase, rollback and escalate.
+      auto_rollback: true
+
+# ---------------------------------------------------------------------------
+# VERIFICATION
+# ---------------------------------------------------------------------------
+verification:
+  checks:
+    - name: "Timeout log messages cleared"
+      method: "CloudWatch Logs Insights re-query"
+      expected: "Zero 'Status: timeout' or 'Task timed out' messages in 5-minute window"
+      log_query: |
+        fields @timestamp, @message
+        | filter @message like "Status: timeout" OR @message like "Task timed out"
+        | stats count() as timeouts by bin(5m)
+
+    - name: "Duration p95 below 80% of configured timeout"
+      method: "CloudWatch Metrics – Duration p95"
+      expected: "Duration p95 < FunctionTimeout * 0.80"
+      metric:
+        namespace: "AWS/Lambda"
+        metric_name: "Duration"
+        statistic: "p95"
+        threshold: "< FunctionTimeout * 0.80"
+
+    - name: "Init Duration eliminated or reduced"
+      method: "CloudWatch Logs REPORT lines"
+      expected: "Init Duration absent (warm invocations) or < 100ms (SnapStart/PC applied)"
+      log_query: |
+        filter @type = "REPORT"
+        | stats max(@initDuration) as maxInitMs by bin(5m)
+
+    - name: "Async event age stable or decreasing"
+      method: "CloudWatch Metrics – AsyncEventAge"
+      expected: "AsyncEventAge trend flat or decreasing over 5-minute window"
+      metric:
+        namespace: "AWS/Lambda"
+        metric_name: "AsyncEventAge"
+        statistic: "Maximum"
+        threshold: "trend not increasing"
+
+    - name: "Provisioned Concurrency spillover near zero"
+      method: "CloudWatch Metrics – ProvisionedConcurrencySpilloverInvocations"
+      expected: "ProvisionedConcurrencySpilloverInvocations close to 0 (PC_COUNT sufficient)"
+      metric:
+        namespace: "AWS/Lambda"
+        metric_name: "ProvisionedConcurrencySpilloverInvocations"
+        statistic: "Sum"
+        threshold: "< 5% of total Invocations"
+
+    - name: "Error rate not elevated post-remediation"
+      method: "CloudWatch Metrics – Errors"
+      expected: "Errors rate equal to or below pre-remediation baseline"
+      metric:
+        namespace: "AWS/Lambda"
+        metric_name: "Errors"
+        statistic: "Sum"
+        threshold: "<= pre_action_baseline"
+
+    - name: "SQS queue depth stable or draining"
+      method: "CloudWatch Metrics – ApproximateAgeOfOldestMessage"
+      expected: "ApproximateAgeOfOldestMessage stable or decreasing after event source remediation"
+      metric:
+        namespace: "AWS/SQS"
+        metric_name: "ApproximateAgeOfOldestMessage"
+        statistic: "Maximum"
+        threshold: "not increasing"
+
+  stability_window: 300
+  success_criteria: >
+    All of the following for 5 consecutive minutes:
+    (1) Zero timeout log messages,
+    (2) Duration p95 < FunctionTimeout * 0.80,
+    (3) Error rate at or below pre-remediation baseline,
+    (4) AsyncEventAge flat or decreasing.
+
+# ---------------------------------------------------------------------------
+# ESCALATION
+# ---------------------------------------------------------------------------
+escalation:
+  auto_remediate: false
+  approval_required: true
+  escalation_timeout: 600
+  notify:
+    - oncall
+    - platform-team

@@ -1,0 +1,622 @@
+schema: "decision-knowledge-record/v1"
+
+metadata:
+  id: "rds-perf-degradation"
+  name: "RDS Performance Degradation"
+  description: >
+    RDS instance exhibits sustained performance degradation: high CPU utilization,
+    elevated I/O latency, connection pool exhaustion, slow queries, or lock contention.
+    Covers five root causes with structured CloudWatch and Performance Insights diagnosis,
+    remediation actions, and verification procedures.
+  category: "database"
+  service: "rds"
+  severity: "high"
+  tags:
+    - rds
+    - performance
+    - cpu
+    - iops
+    - connection-pool
+    - slow-query
+    - lock-contention
+    - performance-insights
+  source_refs:
+    - title: "Amazon RDS – Monitoring with Performance Insights"
+      url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PerfInsights.html"
+      type: "official_doc"
+    - title: "Amazon RDS – Monitoring Metrics"
+      url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/MonitoringOverview.html"
+      type: "official_doc"
+    - title: "Troubleshoot High CPU on Amazon RDS (re:Post)"
+      url: "https://repost.aws/knowledge-center/rds-instance-high-cpu"
+      type: "repost_kc"
+    - title: "Troubleshoot RDS Connection Issues (re:Post)"
+      url: "https://repost.aws/knowledge-center/rds-mysql-connection-refused"
+      type: "repost_kc"
+    - title: "Amazon RDS Proxy – Managing Connections"
+      url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/rds-proxy.html"
+      type: "official_doc"
+    - title: "Amazon RDS – Provisioned IOPS Storage"
+      url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Storage.html#USER_PIOPS"
+      type: "official_doc"
+    - title: "Well-Architected – Performance Efficiency Pillar"
+      url: "https://docs.aws.amazon.com/wellarchitected/latest/performance-efficiency-pillar/welcome.html"
+      type: "well_architected"
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+triggers:
+  - type: "metric_threshold"
+    description: "CPUUtilization sustained above threshold"
+    condition: "AWS/RDS CPUUtilization > 80% for 5 consecutive minutes"
+  - type: "metric_threshold"
+    description: "ReadLatency or WriteLatency spike"
+    condition: "AWS/RDS ReadLatency > 20ms OR WriteLatency > 20ms (p95)"
+  - type: "metric_threshold"
+    description: "DatabaseConnections approaching max_connections limit"
+    condition: "DatabaseConnections > max_connections * 0.85"
+  - type: "log_pattern"
+    description: "Slow query log entries in CloudWatch Logs"
+    condition: "RDS slow query log group contains entries with query_time > long_query_time"
+
+# ---------------------------------------------------------------------------
+# SYMPTOMS
+# ---------------------------------------------------------------------------
+symptoms:
+  - id: "SYM-01"
+    description: "CPUUtilization sustained above 80% for more than 5 minutes"
+    detection_method: "CloudWatch Metrics"
+    metric: "AWS/RDS | CPUUtilization | Average > 80% over 5m"
+
+  - id: "SYM-02"
+    description: "ReadLatency or WriteLatency spike above normal baseline"
+    detection_method: "CloudWatch Metrics"
+    metric: "AWS/RDS | ReadLatency | p95 elevated OR WriteLatency | p95 elevated"
+
+  - id: "SYM-03"
+    description: "DatabaseConnections approaching or exceeding max_connections parameter"
+    detection_method: "CloudWatch Metrics"
+    metric: "AWS/RDS | DatabaseConnections | Maximum approaching engine max_connections"
+
+  - id: "SYM-04"
+    description: "Slow query log entries in CloudWatch Logs with high query_time values"
+    detection_method: "CloudWatch Logs Insights on RDS slow query log group"
+    log_query: |
+      fields @timestamp, @message
+      | filter @message like "Query_time"
+      | parse @message "Query_time: * " as queryTime
+      | filter queryTime > 1.0
+      | stats count() as slowQueries, avg(queryTime) as avgQueryTime by bin(5m)
+      | sort @timestamp desc
+
+  - id: "SYM-05"
+    description: "Performance Insights DBLoad above vCPU count (CPU-bound) or high wait events"
+    detection_method: "Performance Insights – DBLoad breakdown by wait event"
+    cli: >
+      aws pi get-resource-metrics
+      --service-type RDS
+      --identifier db:<DB_INSTANCE_RESOURCE_ID>
+      --metric-queries '[{"Metric":"db.load.avg","GroupBy":{"Group":"db.wait_event","Limit":5}}]'
+      --start-time <ISO_START>
+      --end-time <ISO_END>
+      --period-in-seconds 60
+
+  - id: "SYM-06"
+    description: "FreeStorageSpace declining or DiskQueueDepth elevated (I/O saturation)"
+    detection_method: "CloudWatch Metrics"
+    metric: "AWS/RDS | DiskQueueDepth | Maximum > 1 sustained OR FreeStorageSpace declining"
+
+# ---------------------------------------------------------------------------
+# DIAGNOSIS – DECISION TREE
+# ---------------------------------------------------------------------------
+diagnosis:
+  decision_tree:
+    - step: 1
+      question: "What does the CloudWatch dashboard show? Which metric is most elevated?"
+      check:
+        cli: >
+          aws cloudwatch get-metric-statistics
+          --namespace AWS/RDS
+          --metric-name CPUUtilization
+          --dimensions Name=DBInstanceIdentifier,Value=<DB_INSTANCE_IDENTIFIER>
+          --statistics Average
+          --period 300
+          --start-time $(date -u -d '30 minutes ago' +%FT%TZ)
+          --end-time $(date -u +%FT%TZ)
+      branches:
+        - condition: "CPUUtilization > 80%"
+          result: "CPU bottleneck – proceed to step 2"
+          next_step: 2
+        - condition: "ReadLatency or WriteLatency elevated with DiskQueueDepth > 1"
+          result: "I/O bottleneck – classify as RDS-IO"
+          next_step: 0
+        - condition: "DatabaseConnections approaching max_connections"
+          result: "Connection pool exhaustion – classify as RDS-CONN-POOL"
+          next_step: 0
+        - condition: "Slow query log has entries with high query_time"
+          result: "Slow query – classify as RDS-SLOW-QUERY"
+          next_step: 3
+        - condition: "Metrics normal but latency elevated"
+          result: "Lock contention suspected – proceed to step 4"
+          next_step: 4
+
+    - step: 2
+      question: "Check Performance Insights DBLoad. Is load above vCPU count and dominated by CPU wait?"
+      check:
+        cli: >
+          aws pi get-resource-metrics
+          --service-type RDS
+          --identifier db:<DB_INSTANCE_RESOURCE_ID>
+          --metric-queries '[{"Metric":"db.load.avg","GroupBy":{"Group":"db.wait_event","Limit":5}}]'
+          --start-time <ISO_START>
+          --end-time <ISO_END>
+          --period-in-seconds 60
+      branches:
+        - condition: "DBLoad > vCPU count AND top wait event is CPU"
+          result: "RDS-CPU – instance class undersized for workload"
+          next_step: 0
+        - condition: "DBLoad high AND top wait event is io/* or lock"
+          result: "RDS-IO or RDS-LOCK – investigate I/O or lock path"
+          next_step: 4
+
+    - step: 3
+      question: "Check CloudWatch Logs Insights on slow query log. What queries appear most frequently?"
+      check:
+        log_query: |
+          fields @timestamp, @message
+          | filter @message like "Query_time"
+          | parse @message "Query_time: * Lock_time: * Rows_examined: * " as queryTime, lockTime, rowsExamined
+          | filter queryTime > 1.0
+          | stats count() as count, avg(queryTime) as avgTime, max(rowsExamined) as maxRows by @message
+          | sort count desc
+          | limit 20
+      branches:
+        - condition: "Specific query patterns dominate with high Rows_examined"
+          result: "RDS-SLOW-QUERY – missing index or full table scan"
+          next_step: 0
+        - condition: "Slow queries accompanied by high Lock_time"
+          result: "RDS-LOCK – lock contention driving slow queries"
+          next_step: 4
+
+    - step: 4
+      question: "Check Performance Insights for lock wait events. Are there sustained lock waits?"
+      check:
+        cli: >
+          aws pi get-resource-metrics
+          --service-type RDS
+          --identifier db:<DB_INSTANCE_RESOURCE_ID>
+          --metric-queries '[{"Metric":"db.load.avg","GroupBy":{"Group":"db.wait_event","Limit":10}}]'
+          --start-time <ISO_START>
+          --end-time <ISO_END>
+          --period-in-seconds 60
+      branches:
+        - condition: "Top wait events include 'lock' or 'innodb_row_lock' (MySQL) or 'Lock:relation' (PostgreSQL)"
+          result: "RDS-LOCK – transaction holding locks, blocking others"
+          next_step: 0
+        - condition: "No lock waits found"
+          result: "RDS-SLOW-QUERY or RDS-CPU – re-examine query plans and indexes"
+          next_step: 0
+
+# ---------------------------------------------------------------------------
+# ROOT CAUSES
+# ---------------------------------------------------------------------------
+root_causes:
+  - code: "RDS-CPU"
+    name: "CPU bottleneck – instance class undersized for query workload"
+    description: >
+      The RDS instance class does not have sufficient vCPUs for the current query volume
+      or query complexity. Performance Insights shows DBLoad exceeding vCPU count with
+      CPU as the dominant wait event. Typically caused by query volume growth,
+      missing indexes forcing full table scans, or analytical queries on OLTP instance.
+    probability: "high"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-05"
+
+  - code: "RDS-IO"
+    name: "I/O bottleneck – storage throughput or IOPS exhausted"
+    description: >
+      The RDS instance is exceeding its provisioned IOPS or storage throughput limits.
+      DiskQueueDepth stays elevated above 1, ReadLatency and WriteLatency spike.
+      Common causes: gp2 volume burst bucket depletion, insufficient provisioned IOPS,
+      or large sequential scans causing I/O saturation.
+    probability: "medium"
+    related_symptoms:
+      - "SYM-02"
+      - "SYM-06"
+
+  - code: "RDS-CONN-POOL"
+    name: "Connection pool exhaustion – too many connections to RDS"
+    description: >
+      The number of active DB connections approaches or exceeds the engine max_connections
+      parameter. New connection attempts are rejected with 'Too many connections' error.
+      Caused by application connection pool misconfiguration, connection leaks, or
+      insufficient pool sizing relative to instance memory (max_connections is memory-based).
+    probability: "medium"
+    related_symptoms:
+      - "SYM-03"
+
+  - code: "RDS-SLOW-QUERY"
+    name: "Slow query – missing index or inefficient query plan causing full table scan"
+    description: >
+      One or more queries perform full table scans or use inefficient join plans due to
+      missing indexes or stale table statistics. These queries hold CPU and I/O resources,
+      causing latency to spike across the entire instance during execution.
+    probability: "high"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-04"
+      - "SYM-05"
+
+  - code: "RDS-LOCK"
+    name: "Lock contention – transactions blocking each other causing wait queue buildup"
+    description: >
+      One or more long-running transactions hold row-level or table-level locks, causing
+      subsequent transactions to queue behind them. Performance Insights shows lock wait
+      events as dominant. Latency grows as the lock wait queue deepens.
+    probability: "medium"
+    related_symptoms:
+      - "SYM-02"
+      - "SYM-04"
+      - "SYM-05"
+
+# ---------------------------------------------------------------------------
+# REMEDIATION
+# ---------------------------------------------------------------------------
+remediation:
+  - root_cause_code: "RDS-CPU"
+    actions:
+      - order: 1
+        name: "Scale up instance class to larger vCPU count"
+        description: >
+          Modify the DB instance to a larger instance class in the same family (e.g.,
+          db.r6g.large → db.r6g.xlarge). For Multi-AZ instances this causes a brief
+          failover during the modification window. Schedule during low-traffic period
+          or use Multi-AZ to minimize downtime.
+        type: "aws_cli"
+        command: >
+          aws rds modify-db-instance
+          --db-instance-identifier <DB_INSTANCE_IDENTIFIER>
+          --db-instance-class <NEW_INSTANCE_CLASS>
+          --apply-immediately
+        rollback_command: >
+          aws rds modify-db-instance
+          --db-instance-identifier <DB_INSTANCE_IDENTIFIER>
+          --db-instance-class <PREVIOUS_INSTANCE_CLASS>
+          --apply-immediately
+        risk: "medium"
+        requires_approval: true
+        estimated_impact: "Brief failover (60-120 seconds) for Multi-AZ instance during class change."
+
+      - order: 2
+        name: "Trigger Multi-AZ failover to promote standby with new class (faster than modify)"
+        description: >
+          If the modification is applied to standby first (default behavior), force a
+          failover to promote the already-modified standby as the new primary. This
+          reduces the effective downtime to the failover duration rather than the full
+          modify duration.
+        type: "aws_cli"
+        command: >
+          aws rds reboot-db-instance
+          --db-instance-identifier <DB_INSTANCE_IDENTIFIER>
+          --force-failover
+        rollback_command: >
+          aws rds reboot-db-instance
+          --db-instance-identifier <DB_INSTANCE_IDENTIFIER>
+          --force-failover
+        risk: "medium"
+        requires_approval: true
+        estimated_impact: "Triggers planned failover – 60-120 second connection interruption."
+
+  - root_cause_code: "RDS-IO"
+    actions:
+      - order: 1
+        name: "Enable RDS Storage Autoscaling to prevent FreeStorageSpace exhaustion"
+        description: >
+          Enable autoscaling on gp2/gp3 storage to automatically expand when
+          FreeStorageSpace drops below threshold. Does not increase IOPS for gp2.
+        type: "aws_cli"
+        command: >
+          aws rds modify-db-instance
+          --db-instance-identifier <DB_INSTANCE_IDENTIFIER>
+          --max-allocated-storage <MAX_STORAGE_GIB>
+          --apply-immediately
+        rollback_command: >
+          aws rds modify-db-instance
+          --db-instance-identifier <DB_INSTANCE_IDENTIFIER>
+          --max-allocated-storage 0
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "Storage expansion incurs additional cost at RDS storage pricing."
+
+      - order: 2
+        name: "Switch to Provisioned IOPS (io1/io2) storage for predictable I/O performance"
+        description: >
+          Migrate from gp2 (burst-based IOPS) to io1 or io2 (Provisioned IOPS) storage.
+          Eliminates burst bucket depletion and provides consistent IOPS. Recommended
+          when DiskQueueDepth > 1 is sustained and workload requires predictable I/O.
+        type: "aws_cli"
+        command: >
+          aws rds modify-db-instance
+          --db-instance-identifier <DB_INSTANCE_IDENTIFIER>
+          --storage-type io1
+          --iops <PROVISIONED_IOPS>
+          --apply-immediately
+        rollback_command: >
+          aws rds modify-db-instance
+          --db-instance-identifier <DB_INSTANCE_IDENTIFIER>
+          --storage-type gp2
+          --apply-immediately
+        risk: "medium"
+        requires_approval: true
+        estimated_impact: "io1/io2 storage is significantly more expensive than gp2. Confirm IOPS requirement with Performance Insights data before provisioning."
+
+  - root_cause_code: "RDS-CONN-POOL"
+    prerequisite: >
+      PREREQUISITE: Confirm the RDS parameter group has slow query logging enabled
+      (slow_query_log=1 for MySQL, log_min_duration_statement for PostgreSQL) before
+      diagnosing connection pool issues combined with slow queries.
+    actions:
+      - order: 1
+        name: "Adjust max_connections via RDS parameter group"
+        description: >
+          Increase max_connections in the DB parameter group. Note: for MySQL, the default
+          max_connections is memory-based (roughly DBInstanceClassMemory/12582880 bytes).
+          Increasing beyond the memory-safe limit can cause OOM. Prefer RDS Proxy instead.
+        type: "aws_cli"
+        command: >
+          aws rds modify-db-parameter-group
+          --db-parameter-group-name <PARAMETER_GROUP_NAME>
+          --parameters "ParameterName=max_connections,ParameterValue=<NEW_VALUE>,ApplyMethod=pending-reboot"
+        rollback_command: >
+          aws rds modify-db-parameter-group
+          --db-parameter-group-name <PARAMETER_GROUP_NAME>
+          --parameters "ParameterName=max_connections,ParameterValue=<PREVIOUS_VALUE>,ApplyMethod=pending-reboot"
+        risk: "medium"
+        requires_approval: true
+        estimated_impact: "Requires DB reboot for static parameter or is applied immediately for dynamic parameter. Connection interruption during reboot."
+
+      - order: 2
+        name: "Introduce RDS Proxy or PgBouncer to multiplex connections"
+        description: >
+          RDS Proxy maintains a pool of persistent connections to the RDS instance and
+          multiplexes thousands of application connections onto a smaller set of DB
+          connections. Eliminates connection exhaustion without increasing max_connections.
+          PgBouncer provides similar functionality for PostgreSQL self-managed.
+        type: "aws_cli"
+        command: >
+          aws rds create-db-proxy
+          --db-proxy-name <PROXY_NAME>
+          --engine-family MYSQL
+          --auth '[{"AuthScheme":"SECRETS","SecretArn":"<SECRET_ARN>","IAMAuth":"DISABLED"}]'
+          --role-arn <IAM_ROLE_ARN>
+          --vpc-subnet-ids <SUBNET_IDS>
+          --vpc-security-group-ids <SG_IDS>
+        rollback_command: >
+          aws rds delete-db-proxy --db-proxy-name <PROXY_NAME>
+        risk: "medium"
+        requires_approval: true
+        estimated_impact: "RDS Proxy incurs hourly cost per vCPU of the target instance class."
+
+  - root_cause_code: "RDS-SLOW-QUERY"
+    prerequisite: >
+      PREREQUISITE: RDS parameter group must have slow query logging enabled.
+      For MySQL: slow_query_log=1, long_query_time=1, log_output=FILE.
+      For PostgreSQL: log_min_duration_statement=1000 (milliseconds).
+      Enable via RDS parameter group before attempting slow query diagnosis.
+    actions:
+      - order: 1
+        name: "Identify top slow queries via CloudWatch Logs Insights and add missing indexes"
+        description: >
+          Query the RDS slow query log in CloudWatch Logs to identify the most frequent
+          and most expensive queries. Use EXPLAIN or EXPLAIN ANALYZE to identify missing
+          indexes. Add indexes for high-Rows_examined queries.
+        type: "aws_cli"
+        command: >
+          # CloudWatch Logs Insights query for slow query log group:
+          # fields @timestamp, @message
+          # | filter @message like "Query_time"
+          # | parse @message "Query_time: * " as queryTime
+          # | filter queryTime > 1.0
+          # | stats count(), avg(queryTime) by @message
+          # | sort count desc | limit 20
+          #
+          # After identifying slow query, run EXPLAIN on the target DB:
+          echo "Run EXPLAIN <slow_query> on the RDS instance to identify missing index"
+        rollback_command: >
+          echo "Drop added index if it causes write amplification or unexpected plan changes"
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "Index creation on large tables locks the table briefly on MySQL (ALTER TABLE). Use pt-online-schema-change or gh-ost for zero-downtime index creation on large tables."
+
+      - order: 2
+        name: "Offload read-heavy slow queries to Read Replica"
+        description: >
+          Create a Read Replica and route read-only queries (reporting, analytics,
+          search) to the replica endpoint. Reduces load on the primary Writer,
+          freeing CPU and I/O capacity.
+        type: "aws_cli"
+        command: >
+          aws rds create-db-instance-read-replica
+          --db-instance-identifier <REPLICA_IDENTIFIER>
+          --source-db-instance-identifier <SOURCE_DB_INSTANCE_IDENTIFIER>
+          --db-instance-class <INSTANCE_CLASS>
+          --availability-zone <AZ>
+        rollback_command: >
+          aws rds delete-db-instance
+          --db-instance-identifier <REPLICA_IDENTIFIER>
+          --skip-final-snapshot
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "Read Replica incurs additional instance cost. Replica lag introduces eventual consistency for reads."
+
+  - root_cause_code: "RDS-LOCK"
+    prerequisite: >
+      PREREQUISITE: Confirm Performance Insights is enabled and RDS parameter group
+      has performance_schema=1 (MySQL) or pg_stat_statements enabled (PostgreSQL)
+      to allow lock wait event visibility.
+    actions:
+      - order: 1
+        name: "Identify and terminate blocking transaction"
+        description: >
+          Use Performance Insights Top SQL or database-native queries to identify the
+          long-running transaction holding locks. Terminate it to release the wait queue.
+          For MySQL: KILL <connection_id>. For PostgreSQL: SELECT pg_terminate_backend(pid).
+        type: "aws_cli"
+        command: >
+          # MySQL – identify blocking transactions:
+          # SELECT * FROM information_schema.INNODB_TRX ORDER BY trx_started ASC LIMIT 5;
+          # SELECT * FROM information_schema.PROCESSLIST WHERE Command != 'Sleep' ORDER BY Time DESC;
+          # Kill blocking connection: KILL <connection_id>;
+          #
+          # PostgreSQL – identify blocking queries:
+          # SELECT pid, now() - query_start AS duration, query, state
+          # FROM pg_stat_activity WHERE state != 'idle' ORDER BY duration DESC;
+          # Terminate: SELECT pg_terminate_backend(<pid>);
+          echo "Connect to DB and execute lock identification queries above"
+        rollback_command: >
+          echo "No rollback – terminating a connection is safe. The transaction will be rolled back by the engine."
+        risk: "medium"
+        requires_approval: true
+        estimated_impact: "Terminating a connection causes the transaction to roll back. Any uncommitted work is lost."
+
+      - order: 2
+        name: "Optimize transaction scope to reduce lock hold time"
+        description: >
+          Long-running transactions that hold locks across multiple operations should be
+          refactored to minimize lock scope. Use shorter transactions, SELECT ... FOR UPDATE
+          only where needed, and application-level retry with exponential backoff.
+          This is a code change requiring application redeployment.
+        type: "code_change"
+        command: >
+          echo "Application code change required: reduce transaction scope and add retry logic"
+        rollback_command: >
+          echo "Revert application code change and redeploy"
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "Code change requires testing and deployment cycle."
+
+# ---------------------------------------------------------------------------
+# GUARDRAILS
+# ---------------------------------------------------------------------------
+guardrails:
+  pre_conditions:
+    - description: "Slow query logging must be enabled before diagnosing RDS-SLOW-QUERY"
+      check: >
+        Verify RDS parameter group has slow_query_log=1 (MySQL) or
+        log_min_duration_statement set (PostgreSQL) and the log group exists in CloudWatch.
+        Diagnosing slow queries without logging enabled produces no data.
+      block: true
+
+    - description: "Performance Insights must be enabled before using pi get-resource-metrics"
+      check: >
+        Confirm PerformanceInsightsEnabled=true on the target DB instance via
+        describe-db-instances before issuing pi get-resource-metrics calls.
+      block: false
+
+    - description: "Instance class scale-up requires planned maintenance window or immediate apply acknowledgment"
+      check: >
+        Confirm with operator that --apply-immediately will cause a brief failover
+        for Multi-AZ instances. Document expected downtime before proceeding.
+      block: true
+
+    - description: "Provisioned IOPS cost must be calculated before switching storage type"
+      check: >
+        Calculate monthly cost = IOPS_count * $0.065/month (io1) or $0.10/GB (io2).
+        Present cost to operator before switching from gp2 to io1/io2.
+      block: true
+
+  post_conditions:
+    - description: "CPUUtilization must drop below 70% after scale-up or query optimization"
+      check: "CPUUtilization Average < 70% over 5-minute window post-action"
+      auto_rollback: false
+
+    - description: "DatabaseConnections must stabilize below max_connections threshold"
+      check: "DatabaseConnections < max_connections * 0.70 sustained over 5 minutes"
+      auto_rollback: false
+
+# ---------------------------------------------------------------------------
+# VERIFICATION
+# ---------------------------------------------------------------------------
+verification:
+  checks:
+    - name: "CPUUtilization below threshold"
+      method: "CloudWatch Metrics – CPUUtilization"
+      expected: "CPUUtilization Average < 70% sustained over 5-minute window"
+      metric:
+        namespace: "AWS/RDS"
+        metric_name: "CPUUtilization"
+        statistic: "Average"
+        threshold: "< 70"
+
+    - name: "ReadLatency and WriteLatency within baseline"
+      method: "CloudWatch Metrics – ReadLatency and WriteLatency"
+      expected: "p95 latency at or below pre-degradation baseline"
+      metric:
+        namespace: "AWS/RDS"
+        metric_name: "WriteLatency"
+        statistic: "p95"
+        threshold: "<= pre_degradation_baseline"
+
+    - name: "DatabaseConnections stable below limit"
+      method: "CloudWatch Metrics – DatabaseConnections"
+      expected: "DatabaseConnections < max_connections * 0.70"
+      metric:
+        namespace: "AWS/RDS"
+        metric_name: "DatabaseConnections"
+        statistic: "Maximum"
+        threshold: "< max_connections * 0.70"
+
+    - name: "Slow query log entries cleared"
+      method: "CloudWatch Logs Insights on RDS slow query log group"
+      expected: "Slow query count drops to near 0 or pre-degradation baseline"
+      log_query: |
+        fields @timestamp, @message
+        | filter @message like "Query_time"
+        | parse @message "Query_time: * " as queryTime
+        | filter queryTime > 1.0
+        | stats count() as slowQueries by bin(5m)
+
+    - name: "Performance Insights DBLoad below vCPU count"
+      method: "Performance Insights – DBLoad"
+      expected: "DBLoad (db.load.avg) below vCPU count of instance class"
+      cli: >
+        aws pi get-resource-metrics
+        --service-type RDS
+        --identifier db:<DB_INSTANCE_RESOURCE_ID>
+        --metric-queries '[{"Metric":"db.load.avg"}]'
+        --start-time <ISO_START>
+        --end-time <ISO_END>
+        --period-in-seconds 300
+
+    - name: "DiskQueueDepth normalized"
+      method: "CloudWatch Metrics – DiskQueueDepth"
+      expected: "DiskQueueDepth Maximum < 1 sustained"
+      metric:
+        namespace: "AWS/RDS"
+        metric_name: "DiskQueueDepth"
+        statistic: "Maximum"
+        threshold: "< 1"
+
+  stability_window: 300
+  success_criteria: >
+    All of the following for 5 consecutive minutes:
+    (1) CPUUtilization < 70%,
+    (2) ReadLatency and WriteLatency p95 at or below pre-degradation baseline,
+    (3) DatabaseConnections < max_connections * 0.70,
+    (4) Slow query count at or below pre-degradation baseline,
+    (5) DiskQueueDepth < 1,
+    (6) Performance Insights DBLoad below vCPU count.
+
+# ---------------------------------------------------------------------------
+# ESCALATION
+# ---------------------------------------------------------------------------
+escalation:
+  auto_remediate: false
+  approval_required: true
+  escalation_timeout: 1800
+  notify:
+    - oncall
+    - dba-team
+    - platform-team

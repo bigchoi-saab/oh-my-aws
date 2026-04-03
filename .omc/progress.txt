@@ -1,0 +1,55 @@
+# Ralph Progress Log - oh-my-aws AWS Incident Response Kiro Skill
+
+## Session: 2026-04-03
+
+### Phase 0 (Platform Validation) - COMPLETE
+- US-001: Kiro Skill YAML frontmatter spec confirmed (agentskills.io: name, description required; allowed-tools experimental)
+- US-002: MCP transport confirmed (stdio + HTTP/Streamable HTTP). Config at .kiro/settings/mcp.json
+- US-003: Approval gate via autoApprove/disabledTools. AWS account dry-run mode. All 5 gates PASS or PARTIAL FAIL with alternatives.
+
+Key discovery: Kiro has Skills (knowledge) + Agents (execution) 2-layer architecture. Created .kiro/agents/aws-incident-responder.json
+
+### Phase 1 (MVP) - COMPLETE
+- US-004: Golden source SKILL.md enhanced with full pipeline instructions + scenario routing table. Kiro derived SKILL.md with agentskills.io frontmatter.
+- US-005: lambda-timeout.yaml DKR (25KB, 6 root causes, 9 rollback commands, 3+ pre_conditions, 7+ verification checks)
+- US-006: lambda-throttle.yaml DKR (26KB, 5 root causes, 10 rollback commands, Account vs Function level branching)
+- US-007: guardrails.yaml (3-tier LOW/MEDIUM/HIGH), log-source-map.md (7 services), requirements.md (20 scenarios), design.md (DKR schema), tasks.md (27 checklist items)
+
+### Files Created/Modified
+- .kiro/skills/aws-incident-response/SKILL.md (Kiro derived)
+- .kiro/skills/aws-incident-response/scenarios/lambda-timeout.yaml
+- .kiro/skills/aws-incident-response/scenarios/lambda-throttle.yaml
+- .kiro/skills/aws-incident-response/references/guardrails.yaml
+- .kiro/skills/aws-incident-response/references/log-source-map.md
+- .kiro/settings/mcp.json
+- .kiro/agents/aws-incident-responder.json
+- .kiro/specs/aws-incident-response/requirements.md
+- .kiro/specs/aws-incident-response/design.md
+- .kiro/specs/aws-incident-response/tasks.md
+- .claude/skills/aws-incident-response/SKILL.md (golden source, enhanced)
+- .omc/plans/phase0-validation-report.md
+
+### Phase 2 (Scenario Expansion) - COMPLETE
+- US-008: lambda-sqs-poison-pill.yaml (4 root causes), ecs-crash-loop.yaml (5 root causes, exitCode branching)
+- US-009: rds-failover.yaml (connection pool + DNS), rds-perf-degradation.yaml (Performance Insights), dynamodb-throttle.yaml (on-demand vs provisioned)
+- US-010: post-deploy-5xx.yaml (rollback-first), az-failure.yaml (Zonal Shift), cascade-failure.yaml (circuit breaker + backpressure)
+- US-011: iam-compromise.yaml (HIGH risk, credential disable), region-outage.yaml (Route 53 failover), vpc-unreachable.yaml (6-layer diagnosis), cert-expiry.yaml (ACM DNS validation)
+- US-012: SKILL.md routing tables updated (both golden + Kiro), message-templates.md (6 templates, SEV1-3)
+
+Total: 14 DKR YAML files (12 new + 2 existing), covering all priority 1-2 scenarios across 6 categories
+
+### Phase 3 (MCP Server) - COMPLETE
+- US-013: MCP server scaffolding (FastMCP + boto3), 4 observe tools (query_cloudwatch_logs, get_cloudwatch_metrics, get_cloudtrail_events, describe_aws_health)
+- US-014: act tools (dry_run_remediation, execute_remediation with approval gate), verify tools (check_metric_recovery, validate_stability_window), guardrails.py (validate_pre_conditions)
+- US-015: .kiro/settings/mcp.json updated with aws-ops-tools, Agent JSON updated with @aws-ops-tools references
+
+### Phase 4 (Complete Scenarios + Audit) - COMPLETE
+- US-016: 6 remaining DKR files (ec2-unreachable, s3-access-denied, cloudfront-issue, control-plane-failure, s3-public-exposure, network-unauthorized) → total 20 DKR files
+- US-017: audit/timeline-template.md + audit/postmortem-template.md, SKILL.md audit references updated (both golden + Kiro)
+
+### Learnings
+1. Kiro Skills frontmatter is minimal (name + description required only). allowed-tools is experimental and bugged for workspace skills (#6055)
+2. Tool access control lives in Agent JSON, not Skills. Must create .kiro/agents/ config with tools/allowedTools fields
+3. MCP config at .kiro/settings/mcp.json (not .kiro/mcp.json as originally assumed)
+4. AWS official MCP servers (awslabs.*) available via uvx - can be used immediately without custom MCP server
+5. autoApprove field in MCP config enables 3-tier approval gate without custom MCP protocol extensions

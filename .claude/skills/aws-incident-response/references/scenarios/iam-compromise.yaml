@@ -1,0 +1,229 @@
+schema: decision-knowledge-record/v1
+
+metadata:
+  id: "iam-compromise"
+  name: "IAM 자격 증명 탈취"
+  description: "IAM 액세스 키 또는 사용자 크리덴셜이 유출되어 비인가 사용 감지"
+  category: "security"
+  service: "iam"
+  severity: "critical"
+  tags: ["iam", "security", "credential", "compromise", "guardduty"]
+  source_refs:
+    - title: "IAM Best Practices - Credential Rotation"
+      url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_access-keys.html"
+      type: "official_doc"
+    - title: "GuardDuty Findings"
+      url: "https://docs.aws.amazon.com/guardduty/latest/ug/guardduty_findings.html"
+      type: "official_doc"
+    - title: "Responding to Compromised AWS Credentials"
+      url: "https://docs.aws.amazon.com/IAM/latest/UserGuide/id_credentials_compromised.html"
+      type: "official_doc"
+
+triggers:
+  - type: "event_bridge"
+    description: "GuardDuty 크리덴셜 탈취 발견"
+    condition: "source=aws.guardduty AND detail.type contains 'UnauthorizedAccess' OR 'CredentialAccess'"
+  - type: "metric_threshold"
+    description: "비인가 리전/IP에서 API 호출 감지"
+    condition: "CloudTrail에서 평소 사용하지 않는 리전/IP의 API 호출"
+
+symptoms:
+  - id: "s1"
+    description: "GuardDuty UnauthorizedAccess/IAMUser finding"
+    detection_method: "GuardDuty API 또는 콘솔"
+    cli: "aws guardduty list-findings --detector-id <DETECTOR_ID>"
+  - id: "s2"
+    description: "비인가 리전에서 API 호출"
+    detection_method: "CloudTrail 이벤트"
+  - id: "s3"
+    description: "비정상 IAM 작업 (사용자 생성, 정책 변경, 키 생성)"
+    detection_method: "CloudTrail CreateAccessKey, CreateUser, PutUserPolicy 이벤트"
+
+diagnosis:
+  decision_tree:
+    - step: 1
+      question: "GuardDuty finding이 확인되었는가?"
+      check:
+        cli: "aws guardduty list-findings --detector-id <DETECTOR_ID> --finding-criteria criterion=type,equals=UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration.OutsideAWS"
+      branches:
+        - condition: "Finding 존재"
+          result: "IAM-CONFIRMED-COMPROMISE"
+          next_step: 2
+        - condition: "No finding, but suspicious activity"
+          result: "IAM-SUSPICIOUS"
+          next_step: 2
+    - step: 2
+      question: "어떤 크리덴셜이 탈취되었는가?"
+      check:
+        cli: |
+          aws cloudtrail lookup-events --lookup-attributes AttributeKey=AccessKeyId,AttributeValue=<KEY_ID> \
+            --max-results 20
+      branches:
+        - condition: "Access Key"
+          result: "IAM-KEY"
+          next_step: 0
+        - condition: "Console Login"
+          result: "IAM-CONSOLE"
+          next_step: 0
+        - condition: "AssumeRole"
+          result: "IAM-ROLE"
+          next_step: 0
+
+root_causes:
+  - code: "IAM-KEY"
+    name: "액세스 키 유출"
+    description: "액세스 키가 GitHub, 코드, 환경변수 등에서 노출"
+    probability: "high"
+  - code: "IAM-CONSOLE"
+    name: "콘솔 크리덴셜 탈취"
+    description: "IAM 사용자 비밀번호 유출 또는 피싱"
+    probability: "medium"
+  - code: "IAM-ROLE"
+    name: "AssumeRole 권한 남용"
+    description: "과도한 IAM 권한을 가진 역할의 세션 탈취"
+    probability: "low"
+
+remediation:
+  - root_cause_code: "IAM-KEY"
+    actions:
+      - order: 1
+        name: "유출된 액세스 키 즉시 비활성화"
+        type: "aws_cli"
+        command: |
+          aws iam update-access-key --access-key-id <KEY_ID> --status Inactive --user-name <USER>
+        rollback_command: |
+          aws iam update-access-key --access-key-id <KEY_ID> --status Active --user-name <USER>
+        risk: "low"
+        requires_approval: false
+        estimated_impact:
+          cost: "없음"
+          duration: "즉시 적용"
+          blast_radius: "해당 키를 사용하는 모든 애플리케이션/서비스 인증 실패 — 새 키 발급 후 교체 필요"
+      - order: 2
+        name: "해당 키로 수행된 모든 작업 조사"
+        type: "aws_cli"
+        command: |
+          aws cloudtrail lookup-events \
+            --lookup-attributes AttributeKey=AccessKeyId,AttributeValue=<KEY_ID> \
+            --max-results 50 \
+            --query 'Events[*].[EventTime,EventName,EventSource,SourceIPAddress]'
+        rollback_command: |
+          echo "조회 전용 작업 — 롤백 불필요"
+        risk: "low"
+        requires_approval: false
+        estimated_impact:
+          cost: "없음 (읽기 전용 CloudTrail 조회)"
+          duration: "5~10분"
+          blast_radius: "없음"
+      - order: 3
+        name: "비인가 변경사항 되돌리기"
+        type: "aws_cli"
+        command: |
+          # 비인가로 생성된 IAM 사용자/키 삭제
+          aws iam delete-access-key --access-key-id <ROGUE_KEY_ID> --user-name <ROGUE_USER>
+          aws iam delete-user --user-name <ROGUE_USER>
+          # 비인가로 변경된 IAM 정책 복원
+          aws iam delete-user-policy --user-name <USER> --policy-name <ROGUE_POLICY>
+          # 비인가로 생성된 리소스 삭제 (예: EC2)
+          aws ec2 terminate-instances --instance-ids <ROGUE_INSTANCE_IDS>
+        rollback_command: |
+          echo "보안 사고 대응 조치 — 비인가 리소스 삭제는 되돌리지 않음. 합법적 리소스 삭제 시 백업에서 복원"
+        risk: "high"
+        requires_approval: true
+        estimated_impact:
+          cost: "비인가 리소스 삭제로 해당 비용 정산 중단"
+          duration: "리소스 규모에 따라 10분~1시간"
+          blast_radius: "삭제 전 비인가 vs 정상 리소스 구분 필수 — CloudTrail 증거 기반으로만 삭제"
+
+  - root_cause_code: "IAM-CONSOLE"
+    actions:
+      - order: 1
+        name: "비밀번호 강제 변경 + MFA 활성화"
+        type: "aws_cli"
+        command: |
+          # 기존 로그인 프로필 삭제 후 임시 비밀번호로 재생성
+          aws iam delete-login-profile --user-name <USER>
+          aws iam create-login-profile --user-name <USER> \
+            --password <TEMP_STRONG_PASSWORD> --password-reset-required
+          # 모든 활성 세션 무효화
+          aws iam attach-user-policy --user-name <USER> \
+            --policy-arn arn:aws:iam::aws:policy/AWSDenyAll
+        rollback_command: |
+          aws iam detach-user-policy --user-name <USER> \
+            --policy-arn arn:aws:iam::aws:policy/AWSDenyAll
+          aws iam delete-login-profile --user-name <USER>
+          aws iam create-login-profile --user-name <USER> \
+            --password <NEW_SECURE_PASSWORD> --password-reset-required
+        risk: "medium"
+        requires_approval: false
+        estimated_impact:
+          cost: "없음"
+          duration: "즉시 적용"
+          blast_radius: "해당 IAM 사용자의 모든 콘솔 접근 즉시 차단 — 서비스 계정인 경우 서비스 중단 가능"
+      - order: 2
+        name: "MFA 디바이스 강제 등록"
+        type: "aws_cli"
+        command: |
+          # 기존 MFA 디바이스 확인
+          aws iam list-mfa-devices --user-name <USER>
+          # MFA 없는 경우 가상 MFA 생성
+          aws iam create-virtual-mfa-device \
+            --virtual-mfa-device-name <USER>-mfa \
+            --outfile /tmp/qrcode.png \
+            --bootstrap-method QRCodePNG
+          # MFA 활성화 (사용자가 QR 코드 스캔 후 OTP 입력)
+          aws iam enable-mfa-device --user-name <USER> \
+            --serial-number arn:aws:iam::<ACCOUNT_ID>:mfa/<USER>-mfa \
+            --authentication-code1 <OTP1> --authentication-code2 <OTP2>
+        rollback_command: |
+          aws iam deactivate-mfa-device --user-name <USER> \
+            --serial-number arn:aws:iam::<ACCOUNT_ID>:mfa/<USER>-mfa
+          aws iam delete-virtual-mfa-device \
+            --serial-number arn:aws:iam::<ACCOUNT_ID>:mfa/<USER>-mfa
+        risk: "low"
+        requires_approval: false
+        estimated_impact:
+          cost: "없음"
+          duration: "사용자 MFA 등록 완료까지 5~10분"
+          blast_radius: "MFA 등록 전까지 해당 사용자 콘솔 접근 불가 — 사용자와 직접 협력 필요"
+
+guardrails:
+  pre_conditions:
+    - description: "비활성화 전 해당 키를 사용하는 서비스 확인 (합법적 애플리케이션 중단 방지)"
+      check: "aws cloudtrail lookup-events --lookup-attributes AttributeKey=AccessKeyId,AttributeValue=<KEY_ID> --start-time $(date -u -d '7 days ago' +%Y-%m-%dT%H:%M:%SZ) --query 'Events[*].[EventSource,EventName]' | sort | uniq -c | sort -rn"
+      block: false
+    - description: "침해 증거 확인 및 백업 관리자 접근 경로 확보 (키 비활성화 후 잠금 방지)"
+      check: "aws iam list-users --query 'Users[*].[UserName,PasswordLastUsed]' && aws iam list-access-keys --query 'AccessKeyMetadata[?Status==`Active`].[UserName,AccessKeyId]'"
+      block: true
+  post_conditions:
+    - description: "해당 키 사용 중지 확인"
+      check: "CloudTrail에서 해당 AccessKeyId로 더 이상 호출 없음"
+      auto_rollback: false
+
+verification:
+  checks:
+    - name: "크리덴셜 비활성화"
+      method: "AWS CLI"
+      expected: "Access Key Status = Inactive"
+      cli: "aws iam list-access-keys --user-name <USER> --query 'AccessKeyMetadata[?AccessKeyId==`<KEY_ID>`].Status'"
+    - name: "비인가 활동 중지"
+      method: "AWS CLI"
+      expected: "CloudTrail에서 해당 키/사용자 호출 소멸 (최근 10분 내 이벤트 없음)"
+      cli: "aws cloudtrail lookup-events --lookup-attributes AttributeKey=AccessKeyId,AttributeValue=<KEY_ID> --start-time $(date -u -d '10 minutes ago' +%Y-%m-%dT%H:%M:%SZ) --query 'Events[*].[EventTime,EventName,SourceIPAddress]'"
+    - name: "GuardDuty finding 해결"
+      method: "AWS CLI"
+      expected: "Finding 상태 = Archived 또는 신규 발생 없음"
+      cli: "aws guardduty get-findings --detector-id <DETECTOR_ID> --finding-ids <FINDING_ID> --query 'Findings[*].[Id,Service.Archived,UpdatedAt]'"
+    - name: "IAM 계정 무결성 확인"
+      method: "AWS CLI"
+      expected: "비인가 IAM 사용자/키 없음"
+      cli: "aws iam generate-credential-report && aws iam get-credential-report --query 'Content' | base64 -d"
+  stability_window: 1800
+  success_criteria: "크리덴셜 비활성화, 비인가 활동 중지, GuardDuty 해결"
+
+escalation:
+  auto_remediate: true
+  approval_required: false
+  escalation_timeout: 60
+  notify: ["oncall", "security", "management"]
+  note: "보안 사건은 자동 조치 우선 — 사후 검토"

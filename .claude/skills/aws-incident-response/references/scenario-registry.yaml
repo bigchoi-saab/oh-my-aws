@@ -1,0 +1,323 @@
+schema: decision-knowledge-registry/v1
+
+registry:
+  name: oh-my-aws-incident-scenarios
+  description: AWS 장애 시나리오 레지스트리 - Observe→Reason→Act→Verify→Audit 파이프라인 매핑
+  version: "0.1.0"
+
+categories:
+  - id: compute
+    name: Compute
+    services: [lambda, ecs, ec2, fargate]
+  - id: database
+    name: Database
+    services: [rds, dynamodb, elasticache]
+  - id: network
+    name: Network
+    services: [vpc, route53, cloudfront, alb, nlb, nat-gateway]
+  - id: storage
+    name: Storage
+    services: [s3, ebs, efs]
+  - id: deployment
+    name: Deployment
+    services: [codedeploy, codepipeline, cloudformation, cdk]
+  - id: platform
+    name: Platform
+    services: [aws-health, multi-az, multi-region]
+  - id: security
+    name: Security
+    services: [iam, guardduty, waf, acm]
+
+scenarios:
+  # --- Compute ---
+  - id: lambda-timeout-cold-start
+    name: Lambda 콜드 스타트 및 타임아웃
+    category: compute
+    service: lambda
+    severity: high
+    priority: 1
+    dkr_status: normalized  # docs/research/05 에 전체 DKR 존재
+    root_causes:
+      - TIMEOUT-CFG   # 타임아웃 설정 부족
+      - TIMEOUT-MEM   # 메모리/CPU 부족
+      - TIMEOUT-DEP   # 다운스트림 종속성 지연
+      - TIMEOUT-VPC   # VPC 라우팅 문제
+      - TIMEOUT-SDK   # SDK 타임아웃 불일치
+      - TIMEOUT-COLD  # 콜드 스타트
+    first_signal: "CloudWatch Logs 'Task timed out' OR Duration p95 > timeout*0.8"
+
+  - id: lambda-throttle-concurrency-exhaustion
+    name: Lambda 동시성 한계 초과 쓰로틀링
+    category: compute
+    service: lambda
+    severity: high
+    priority: 1
+    dkr_status: normalized
+    root_causes:
+      - THROTTLE-ACCT   # 계정 레벨 한계
+      - THROTTLE-RESV   # 함수 Reserved Concurrency
+      - THROTTLE-RESV-ZERO # Reserved Concurrency 0 설정
+      - THROTTLE-BURST  # 버스트 스케일링 한계
+      - THROTTLE-SRC    # 이벤트 소스 병목
+    first_signal: "CloudWatch Metrics Throttles > 0 OR HTTP 429"
+
+  - id: lambda-sqs-poison-pill-retry-storm
+    name: SQS 포이즌 필 및 재시도 폭주
+    category: compute
+    service: lambda
+    severity: high
+    priority: 1
+    dkr_status: normalized
+    root_causes:
+      - POISON-MISSING-PARTIAL-BATCH  # Partial Batch Failure 미처리
+      - POISON-NO-DLQ                 # DLQ 미설정
+      - POISON-VISIBILITY             # Visibility Timeout 불일치
+      - POISON-NO-IDEMPOTENCY         # 멱등성 미보장
+    first_signal: "SQS 대기열 메시지 누적 + DLQ 메시지 증가"
+
+  - id: ecs-crash-loop
+    name: ECS 태스크 반복 실패
+    category: compute
+    service: ecs
+    severity: critical
+    priority: 2
+    dkr_status: normalized
+    root_causes:
+      - ECS-OOM          # exit 137 - 메모리 부족
+      - ECS-APP-ERROR    # exit 1 - 애플리케이션 에러
+      - ECS-IMAGE-PULL   # CannotPullContainerError
+      - ECS-SECRET-INIT  # ResourceInitializationError
+      - ECS-HEALTH-FAIL  # Health Check 반복 실패
+    first_signal: "ECS 서비스 이벤트 'unable to start tasks' OR RunningTaskCount 급감"
+
+  - id: ec2-unreachable
+    name: EC2 인스턴스 응답 불가
+    category: compute
+    service: ec2
+    severity: high
+    priority: 3
+    dkr_status: normalized
+    root_causes:
+      - EC2-SYSTEM-CHECK  # AWS 인프라 이슈
+      - EC2-INSTANCE-CHECK # OS/앱 이슈
+      - EC2-SG-BLOCK       # Security Group 차단
+    first_signal: "Status Check Failed OR SSH/SSM 연결 불가"
+
+  # --- Database ---
+  - id: rds-perf-degradation
+    name: RDS 성능 저하
+    category: database
+    service: rds
+    severity: high
+    priority: 2
+    dkr_status: normalized
+    root_causes:
+      - RDS-CPU          # CPU 병목
+      - RDS-IO           # I/O 병목
+      - RDS-CONN-POOL    # 커넥션 풀 고갈
+      - RDS-SLOW-QUERY   # 슬로우 쿼리
+      - RDS-LOCK         # 잠금 경합
+    first_signal: "CPUUtilization > 80% OR ReadLatency/WriteLatency 급증"
+
+  - id: rds-failover
+    name: RDS Multi-AZ 페일오버
+    category: database
+    service: rds
+    severity: critical
+    priority: 1
+    dkr_status: normalized
+    root_causes:
+      - RDS-AZ-FAILURE   # AZ 장애
+      - RDS-MAINT        # 유지관리 이벤트
+      - RDS-MANUAL       # 수동 페일오버
+    first_signal: "RDS 이벤트 'Multi-AZ failover' OR DB 연결 에러 급증"
+
+  - id: dynamodb-throttle
+    name: DynamoDB 쓰로틀링
+    category: database
+    service: dynamodb
+    severity: high
+    priority: 2
+    dkr_status: normalized
+    root_causes:
+      - DDB-CAPACITY     # 프로비저닝 용량 부족
+      - DDB-HOT-PARTITION # Hot Partition
+      - DDB-BURST        # 버스트 용량 소진
+    first_signal: "ThrottledRequests > 0 OR ProvisionedThroughputExceededException"
+
+  # --- Network ---
+  - id: vpc-unreachable
+    name: VPC 연결 불가
+    category: network
+    service: vpc
+    severity: critical
+    priority: 2
+    dkr_status: normalized
+    root_causes:
+      - VPC-SG           # Security Group 차단
+      - VPC-NACL         # Network ACL 차단
+      - VPC-ROUTE        # Route Table 누락
+      - VPC-NAT          # NAT Gateway 문제
+      - VPC-DNS          # DNS 해석 실패
+      - VPC-ENDPOINT     # VPC Endpoint 문제
+    first_signal: "Connection timed out/refused 에러 OR VPC Flow Logs REJECT"
+
+  - id: s3-access-denied
+    name: S3 Access Denied
+    category: storage
+    service: s3
+    severity: medium
+    priority: 3
+    dkr_status: normalized
+    root_causes:
+      - S3-IAM           # IAM Policy 누락
+      - S3-BUCKET-POLICY # Bucket Policy 거부
+      - S3-CROSS-ACCOUNT # Cross-Account 설정
+      - S3-KMS           # KMS 복호화 권한
+      - S3-BPA           # Block Public Access
+    first_signal: "HTTP 403 Forbidden on S3 operations"
+
+  - id: cloudfront-issue
+    name: CloudFront 캐시/5xx 문제
+    category: network
+    service: cloudfront
+    severity: medium
+    priority: 3
+    dkr_status: normalized
+    root_causes:
+      - CF-ORIGIN        # 원본 서버 문제
+      - CF-CACHE-STALE   # 오래된 캐시
+      - CF-CERT          # TLS 인증서 문제
+      - CF-WAF           # WAF 차단
+    first_signal: "CloudFront 5xxErrorRate 상승 OR 콘텐츠 미갱신"
+
+  # --- Deployment ---
+  - id: post-deploy-5xx
+    name: 배포 후 5xx 에러 급증
+    category: deployment
+    service: multi
+    severity: critical
+    priority: 1
+    dkr_status: normalized
+    root_causes:
+      - DEPLOY-CODE      # 코드 버그/리그레션
+      - DEPLOY-CONFIG    # 설정/환경변수 오류
+      - DEPLOY-DEPS      # 종속성 호환 문제
+      - DEPLOY-RESOURCE  # 리소스 한계 (메모리, 동시성)
+    first_signal: "배포 시간과 에러 발생 시간 상관관계 + 5xx Rate 급증"
+
+  - id: cert-expiry
+    name: 인증서/자격증명 만료
+    category: security
+    service: acm
+    severity: high
+    priority: 2
+    dkr_status: normalized
+    root_causes:
+      - CERT-ACM-EXPIRE  # ACM 인증서 만료
+      - CERT-DNS-FAIL    # DNS 검증 실패
+      - CERT-REGION      # 리전 불일치
+    first_signal: "HTTPS 인증서 오류 OR ACM 상태 EXPIRED"
+
+  # --- Platform ---
+  - id: az-failure
+    name: AZ 수준 장애
+    category: platform
+    service: multi
+    severity: critical
+    priority: 1
+    dkr_status: normalized
+    first_signal: "특정 AZ 타겟 헬스체크 실패 집중 패턴"
+
+  - id: region-outage
+    name: 리전 전체 장애
+    category: platform
+    service: multi
+    severity: critical
+    priority: 1
+    dkr_status: normalized
+    first_signal: "여러 서비스 동시 장애 + AWS Health Dashboard 이벤트"
+
+  - id: control-plane-failure
+    name: 제어 평면 장애
+    category: platform
+    service: multi
+    severity: high
+    priority: 2
+    dkr_status: normalized
+    first_signal: "AWS API(create/update/delete) 실패 + 실행 중 워크로드 생존"
+
+  - id: cascade-failure
+    name: 연쇄 실패 / 재시도 폭풍
+    category: platform
+    service: multi
+    severity: critical
+    priority: 1
+    dkr_status: normalized
+    first_signal: "여러 서비스 동시 에러 + 재시도/타임아웃 급증 패턴"
+
+  # --- Security ---
+  - id: iam-compromise
+    name: IAM 자격증명 유출
+    category: security
+    service: iam
+    severity: critical
+    priority: 1
+    dkr_status: normalized
+    first_signal: "GuardDuty IAM 이상행위 탐지 OR 비정상 API 호출 패턴"
+
+  - id: s3-public-exposure
+    name: S3 버킷 공개 노출
+    category: security
+    service: s3
+    severity: high
+    priority: 2
+    dkr_status: normalized
+    first_signal: "AWS Config 규칙 위반 OR GuardDuty S3 finding"
+
+  - id: network-unauthorized
+    name: 비인가 네트워크 접근
+    category: security
+    service: multi
+    severity: high
+    priority: 2
+    dkr_status: normalized
+    root_causes:
+      - NET-UNAUTHORIZED  # 비인가 네트워크 접근
+    first_signal: "CloudTrail 비인가 네트워크 접근 이벤트"
+
+# Harness Pipeline Mapping
+mappings:
+  observe:
+    - trigger: alarm
+      scenarios: [lambda-timeout-cold-start, lambda-throttle-concurrency-exhaustion, rds-perf-degradation, dynamodb-throttle]
+    - trigger: metric_threshold
+      scenarios: [ecs-crash-loop, post-deploy-5xx, az-failure]
+    - trigger: log_pattern
+      scenarios: [lambda-timeout-cold-start, vpc-unreachable, s3-access-denied]
+    - trigger: event_bridge
+      scenarios: [rds-failover, region-outage, iam-compromise]
+    - trigger: health_dashboard
+      scenarios: [region-outage, az-failure, control-plane-failure]
+
+  reason:
+    - pattern: timeout_or_throttle
+      scenarios: [lambda-timeout-cold-start, lambda-throttle-concurrency-exhaustion, dynamodb-throttle]
+    - pattern: deploy_correlation
+      scenarios: [post-deploy-5xx, ecs-crash-loop]
+    - pattern: network_block
+      scenarios: [vpc-unreachable, s3-access-denied]
+    - pattern: capacity_saturation
+      scenarios: [rds-perf-degradation, lambda-throttle-concurrency-exhaustion, dynamodb-throttle]
+
+  act:
+    - type: rollback
+      scenarios: [post-deploy-5xx, ecs-crash-loop]
+    - type: scale_out
+      scenarios: [lambda-throttle-concurrency-exhaustion, rds-perf-degradation, dynamodb-throttle]
+    - type: traffic_shift
+      scenarios: [az-failure, region-outage]
+    - type: config_change
+      scenarios: [lambda-timeout-cold-start, cloudfront-issue, cert-expiry]
+    - type: credential_revoke
+      scenarios: [iam-compromise]

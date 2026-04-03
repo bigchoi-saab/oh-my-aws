@@ -1,0 +1,144 @@
+schema: decision-knowledge-record/v1
+
+metadata:
+  id: "az-failure"
+  name: "AZ(가용영역) 장애"
+  description: "특정 AZ의 AWS 인프라 장애로 해당 AZ 리소스 전체 영향"
+  category: "platform"
+  service: "multi"
+  severity: "critical"
+  tags: ["az", "outage", "zonal-shift", "multi-az"]
+  source_refs:
+    - title: "ARC Zonal Shift"
+      url: "https://docs.aws.amazon.com/route53/latest/API/API_ZonalShift.html"
+      type: "official_doc"
+    - title: "AWS Resilience Hub"
+      url: "https://docs.aws.amazon.com/resilience-hub/latest/userguide/what-is-resilience-hub.html"
+      type: "official_doc"
+
+triggers:
+  - type: "metric_threshold"
+    description: "특정 AZ의 ALB Target 건강 검사 대량 실패"
+    condition: "ALB Target health per AZ shows failure in one AZ only"
+
+symptoms:
+  - id: "s1"
+    description: "단일 AZ에 UnHealthyHostCount 집중"
+    detection_method: "ALB 메트릭 AZ별 분석"
+  - id: "s2"
+    description: "AWS Health Dashboard에 AZ 이벤트"
+    detection_method: "AWS Health API"
+    cli: "aws health describe-events --filter eventStatusCodes=open"
+  - id: "s3"
+    description: "해당 AZ의 EC2/ECS/RDS 상태 이상"
+
+diagnosis:
+  decision_tree:
+    - step: 1
+      question: "AWS Health 이벤트가 존재하는가?"
+      check:
+        cli: "aws health describe-events --filter eventStatusCodes=open --region us-east-1"
+      branches:
+        - condition: "AWS Health AZ 이벤트 존재"
+          result: "AZ-AWS-CONFIRMED"
+          next_step: 0
+        - condition: "이벤트 없음"
+          result: "AZ-APP-LEVEL"
+          next_step: 0
+    - step: 2
+      question: "ALB가 Multi-AZ인가?"
+      check:
+        cli: "aws elbv2 describe-load-balancers --load-balancer-arns <ALB_ARN> --query 'LoadBalancers[0].AvailabilityZones'"
+      branches:
+        - condition: "Multi-AZ 구성"
+          result: "AZ-FAILOVER-READY"
+          next_step: 0
+        - condition: "단일 AZ"
+          result: "AZ-SINGLE-POINT"
+          next_step: 0
+
+root_causes:
+  - code: "AZ-AWS-CONFIRMED"
+    name: "AWS AZ 수준 인프라 장애"
+    description: "AWS 공식 장애 — 해당 AZ 전체 영향"
+    probability: "low"
+  - code: "AZ-APP-LEVEL"
+    name: "AZ 수준 애플리케이션/배포 문제"
+    description: "특정 AZ에만 배포된 버전이나 설정 문제"
+    probability: "medium"
+
+remediation:
+  - root_cause_code: "AZ-AWS-CONFIRMED"
+    actions:
+      - order: 1
+        name: "ARC Zonal Shift 실행"
+        type: "aws_cli"
+        command: |
+          aws arc-zonal-shift start-zonal-shift \
+            --resource-identifier <ALB_ARN> \
+            --away-from <AFFECTED_AZ> \
+            --expires-in 3600
+        rollback_command: |
+          aws arc-zonal-shift cancel-zonal-shift --zonal-shift-id <SHIFT_ID>
+        risk: "medium"
+        requires_approval: true
+        estimated_impact:
+          cost: "없음"
+          duration: "즉시 적용 (수초 이내 트래픽 전환)"
+          blast_radius: "나머지 AZ에 트래픽 집중 — 잔여 AZ 용량이 전체 부하를 감당할 수 있는지 사전 확인 필수"
+      - order: 2
+        name: "ALB 대상 그룹에서 해당 AZ 비활성화"
+        type: "aws_cli"
+        command: |
+          aws elbv2 deregister-targets --target-group-arn <TG_ARN> \
+            --targets id=<INSTANCE_ID>
+        rollback_command: |
+          aws elbv2 register-targets --target-group-arn <TG_ARN> \
+            --targets id=<INSTANCE_ID>
+        risk: "low"
+        requires_approval: false
+        estimated_impact:
+          cost: "없음"
+          duration: "즉시 (드레이닝 30-60초)"
+          blast_radius: "해당 AZ 인스턴스만, 나머지 AZ 정상 처리"
+      - order: 3
+        name: "RDS Multi-AZ 페일오버 확인"
+        type: "aws_cli"
+        command: "aws rds describe-db-instances --query 'DBInstances[0].MultiAZ'"
+        rollback_command: |
+          # 수동 페일오버가 필요한 경우에만 사용
+          aws rds reboot-db-instance --db-instance-identifier <INSTANCE> --force-failover
+        risk: "low"
+        requires_approval: false
+        estimated_impact:
+          cost: "없음 (읽기 전용)"
+          duration: "즉시"
+          blast_radius: "없음 — 조회 전용 작업"
+
+guardrails:
+  pre_conditions:
+    - description: "나머지 AZ에 충분한 용량이 있는지 확인"
+      check: "RunningTaskCount × (AZ 수 - 1) ≥ 최소 필요 용량"
+      block: false
+    - description: "Zonal Shift 실행 전 AWS Health 이벤트 존재 여부 확인"
+      check: "aws health describe-events --filter eventStatusCodes=open 결과에 해당 AZ 이벤트 포함"
+      block: true
+  post_conditions:
+    - description: "정상 AZ에서 서비스 유지"
+      check: "UnHealthyHostCount = 0 in remaining AZs"
+      auto_rollback: false
+
+verification:
+  checks:
+    - name: "트래픽 정상 AZ로 우회"
+      expected: "UnHealthyHostCount = 0 in active AZs"
+    - name: "서비스 복원"
+      expected: "5xx < SLA"
+  stability_window: 300
+  success_criteria: "정상 AZ에서 서비스 유지, 에러율 SLA 내"
+
+escalation:
+  auto_remediate: false
+  approval_required: true
+  escalation_timeout: 300
+  notify: ["oncall", "management"]
