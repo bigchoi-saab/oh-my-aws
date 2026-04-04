@@ -1,98 +1,135 @@
 {
   "project": "oh-my-aws",
-  "task": "AWS Incident Response Kiro CLI Skill - Phase 0~4 Implementation",
-  "created": "2026-04-03",
-  "plan_ref": ".omc/plans/aws-kiro-skill-implementation.md",
+  "task": "TMT-Inspired Skill System Improvements — Phase-Gated Router + Token Discipline + Agent Quality",
+  "created": "2026-04-04",
+  "plan_ref": ".omc/plans/tmt-skill-improvements.md",
   "stories": [
-    {"id":"US-001","title":"Phase 0: Kiro Skill spec","phase":0,"priority":1,"passes":true,"acceptanceCriteria":["(completed)"]},
-    {"id":"US-002","title":"Phase 0: MCP transport","phase":0,"priority":2,"passes":true,"acceptanceCriteria":["(completed)"]},
-    {"id":"US-003","title":"Phase 0: Approval gate + pivot","phase":0,"priority":3,"passes":true,"acceptanceCriteria":["(completed)"]},
-    {"id":"US-004","title":"Phase 1: SKILL.md dual-target","phase":1,"priority":4,"passes":true,"acceptanceCriteria":["(completed)"]},
-    {"id":"US-005","title":"Phase 1: Lambda timeout DKR","phase":1,"priority":5,"passes":true,"acceptanceCriteria":["(completed)"]},
-    {"id":"US-006","title":"Phase 1: Lambda throttle DKR","phase":1,"priority":6,"passes":true,"acceptanceCriteria":["(completed)"]},
-    {"id":"US-007","title":"Phase 1: Guardrails + specs","phase":1,"priority":7,"passes":true,"acceptanceCriteria":["(completed)"]},
-    {"id":"US-008","title":"Phase 2: Compute DKR","phase":2,"priority":8,"passes":true,"acceptanceCriteria":["(completed)"]},
-    {"id":"US-009","title":"Phase 2: Database DKR","phase":2,"priority":9,"passes":true,"acceptanceCriteria":["(completed)"]},
-    {"id":"US-010","title":"Phase 2: Platform DKR","phase":2,"priority":10,"passes":true,"acceptanceCriteria":["(completed)"]},
-    {"id":"US-011","title":"Phase 2: Security+Network DKR","phase":2,"priority":11,"passes":true,"acceptanceCriteria":["(completed)"]},
-    {"id":"US-012","title":"Phase 2: Routing + templates","phase":2,"priority":12,"passes":true,"acceptanceCriteria":["(completed)"]},
     {
-      "id": "US-013",
-      "title": "Phase 3: MCP Server 스캐폴딩 + Observe 도구",
-      "phase": 3,
-      "priority": 13,
+      "id": "US-001",
+      "title": "A1: team-leader SKILL.md 분할 (Phase-Gated Router + 7 참조파일)",
+      "phase": 1,
+      "priority": 1,
       "passes": true,
       "acceptanceCriteria": [
-        "mcp-servers/aws-ops-tools/pyproject.toml이 존재하고 fastmcp, boto3 의존성이 포함됨",
-        "mcp-servers/aws-ops-tools/server.py가 FastMCP 기반 MCP 서버 진입점임",
-        "mcp-servers/aws-ops-tools/tools/__init__.py가 존재함",
-        "tools/observe.py에 query_cloudwatch_logs 함수가 있고, log_group+query+time_range 파라미터를 받아 boto3 logs.start_query/get_query_results를 호출함",
-        "tools/observe.py에 get_cloudwatch_metrics 함수가 있고, namespace+metric_name+dimensions+statistic+period를 받아 cloudwatch.get_metric_statistics를 호출함",
-        "tools/observe.py에 get_cloudtrail_events 함수가 있고, boto3 cloudtrail.lookup_events를 호출함",
-        "tools/observe.py에 describe_aws_health 함수가 있고, boto3 health.describe_events를 호출함",
-        "모든 도구 함수에 타입 힌트(파라미터 + 반환)가 있음",
-        "모든 도구 함수에 에러 핸들링(try/except)이 있고 의미있는 에러 메시지를 반환함"
+        "aws-team-leader/SKILL.md가 60줄 이하",
+        "SKILL.md에 phase-gated dispatch table이 포함됨 (순차 목록 아님)",
+        "dispatch table에 '현재 phase에 해당하는 참조만 로드하라. 다른 참조는 읽지 않는다.' 명시",
+        "references/triage-protocol.md 생성됨 (현재 Section 2+3 내용)",
+        "references/agent-creation-protocol.md 생성됨 (현재 Section 4 내용)",
+        "references/execution-flow.md 생성됨 (현재 Section 5 내용)",
+        "references/approval-gate.md 생성됨 (현재 Section 6 내용)",
+        "references/cdk-protocol.md 생성됨 (현재 Section 7 내용)",
+        "references/error-handling.md 생성됨 (현재 Section 8 내용)",
+        "references/final-report-template.md 생성됨 (현재 Section 9 내용)",
+        "execution-flow.md 내 'Section 6' 참조가 references/approval-gate.md로 교체됨",
+        "execution-flow.md 내 'Section 7' 참조가 references/cdk-protocol.md로 교체됨",
+        "execution-flow.md 내 'Section 8' 참조가 references/error-handling.md로 교체됨",
+        "execution-flow.md 내 'Section 9' 참조가 references/final-report-template.md로 교체됨",
+        "error-handling.md 내 'Section 6' 참조가 references/approval-gate.md로 교체됨",
+        "handoff-schemas.yaml 경로/내용 변경 없음"
       ]
     },
     {
-      "id": "US-014",
-      "title": "Phase 3: Act 도구 (승인 게이트 + dry-run) + Verify 도구",
-      "phase": 3,
-      "priority": 14,
+      "id": "US-002",
+      "title": "A2: SESSION-CHECKPOINT 메커니즘 추가",
+      "phase": 2,
+      "priority": 2,
       "passes": true,
       "acceptanceCriteria": [
-        "tools/act.py에 dry_run_remediation 함수가 있고, CLI 명령어+예상 영향+rollback 명령어를 반환함 (실행하지 않음)",
-        "tools/act.py에 execute_remediation 함수가 있고, guardrails 사전조건 검증 후 subprocess로 AWS CLI를 실행함",
-        "execute_remediation에서 risk=HIGH일 때 approval_required=true를 반환하고 실행을 차단함",
-        "execute_remediation에서 사전조건(pre_conditions) 검증 실패 시 실행을 차단하고 실패 사유를 반환함",
-        "tools/verify.py에 check_metric_recovery 함수가 있고, CloudWatch 메트릭이 정상 범위로 돌아왔는지 확인함",
-        "tools/verify.py에 validate_stability_window 함수가 있고, 지정 시간(초) 동안 메트릭을 폴링하여 안정성을 검증함",
-        "mcp-servers/aws-ops-tools/guardrails.py에 validate_pre_conditions 함수가 있음"
+        "references/session-checkpoint.md 파일 생성됨",
+        "checkpoint.yaml 스키마에 current_phase enum이 15개 값 포함 (triage~complete + error/rollback/escalation)",
+        "error_context 필드 정의됨 (error_type, failed_action, rollback_in_progress, retry_count)",
+        "롤백 중 세션 중단 시 재개 규칙 명시 (rollback_in_progress 처리)",
+        "라우터 SKILL.md dispatch table 하단에 session-checkpoint.md '항상 로드' 참조 포함",
+        "체크포인트 없으면 기존 동작과 호환됨을 명시"
       ]
     },
     {
-      "id": "US-015",
-      "title": "Phase 3: Kiro MCP 등록 + Agent JSON 업데이트",
-      "phase": 3,
-      "priority": 15,
+      "id": "US-003",
+      "title": "B1: Agent 페르소나 강화 (5개 agent)",
+      "phase": 2,
+      "priority": 3,
       "passes": true,
       "acceptanceCriteria": [
-        ".kiro/settings/mcp.json에 aws-ops-tools 서버가 stdio transport로 등록됨",
-        ".kiro/agents/aws-incident-responder.json의 mcpServers에 aws-ops-tools가 추가됨",
-        "Agent JSON의 tools에 @aws-ops-tools 참조가 포함됨",
-        "Agent JSON의 allowedTools에 @aws-ops-tools/observe_*, @aws-ops-tools/verify_* 패턴이 있음",
-        "Agent JSON의 autoApprove에 observe 도구들이 포함되고, act 도구들은 미포함됨"
+        "aws-diagnostician.md에 페르소나 섹션 추가됨 (배경/가치3/원칙3/경계케이스2+)",
+        "aws-executor.md에 페르소나 섹션 추가됨",
+        "aws-reporter.md에 페르소나 섹션 추가됨",
+        "aws-cdk-analyzer.md에 페르소나 섹션 추가됨",
+        "aws-cdk-engineer.md에 페르소나 섹션 추가됨",
+        "각 페르소나 섹션이 25줄을 초과하지 않음",
+        "기존 역할/입력/실행순서/제약사항/산출물 섹션 변경 없음",
+        "한국어로 작성됨"
       ]
     },
     {
-      "id": "US-016",
-      "title": "Phase 4: 잔여 DKR 6개 (ec2 + s3 + cloudfront + control-plane + s3-public + network-unauthorized)",
+      "id": "US-004",
+      "title": "B2: Self-Review 단계 추가 (Executor + CDK Engineer)",
+      "phase": 2,
+      "priority": 4,
+      "passes": true,
+      "acceptanceCriteria": [
+        "aws-executor.md에 Act와 Verify 사이에 Self-Review phase 삽입됨",
+        "Executor self-review 3개 질문 정의됨 (의도한 조치만/롤백경로/부작용)",
+        "aws-cdk-engineer.md에 CDK Self-Review 섹션 삽입됨",
+        "CDK Engineer self-review 3개 질문 정의됨 (cdk synth/diff 범위/타 스택 영향)",
+        "실패 시 self-review.yaml을 인시던트 디렉토리에 기록하도록 명시됨",
+        "self-review.yaml 스키마가 정의됨 (agent, timestamp, passed, questions)",
+        "execution.yaml에 self-review 관련 필드가 추가되지 않음"
+      ]
+    },
+    {
+      "id": "US-005",
+      "title": "C2: Scope Lock 메커니즘 (Known Gaps 추적)",
+      "phase": 2,
+      "priority": 5,
+      "passes": true,
+      "acceptanceCriteria": [
+        "references/scope-lock.md 파일 생성됨",
+        "known-gaps.yaml 스키마 정의됨 (id, discovered_at, discovered_by, phase, category, description, priority, related_resource)",
+        "urgent gap 발견 시 즉시 알림 규칙 포함",
+        "agent-creation-protocol.md에 Reporter 생성 시 known-gaps.yaml 경로 전달 규칙 추가됨",
+        "라우터 dispatch table에서 scope-lock 참조 방법 명시됨"
+      ]
+    },
+    {
+      "id": "US-006",
+      "title": "A3: 토큰 규율 5규칙 삽입",
+      "phase": 3,
+      "priority": 6,
+      "passes": true,
+      "acceptanceCriteria": [
+        "라우터 SKILL.md 핵심 원칙에 토큰 규율 5개 규칙 명시됨",
+        "규칙 1이 phase-gated dispatch를 명시적으로 참조",
+        "agent-creation-protocol.md에 '토큰 규율' 섹션 추가됨",
+        "규칙이 기존 동작을 제한하지 않음 (가이드라인 수준)"
+      ]
+    },
+    {
+      "id": "US-007",
+      "title": "B3: Foreground-Agent-Only 규칙 추가",
+      "phase": 3,
+      "priority": 7,
+      "passes": true,
+      "acceptanceCriteria": [
+        "라우터 SKILL.md 핵심 원칙에 foreground 규칙 명시됨",
+        "agent-creation-protocol.md에 foreground 실행 지시 포함됨",
+        "예외 없이 모든 agent에 적용됨을 명시",
+        "이유 설명 포함 (background agent는 승인 프롬프트 수신 불가)"
+      ]
+    },
+    {
+      "id": "US-008",
+      "title": "Phase 4: 통합 검증",
       "phase": 4,
-      "priority": 16,
+      "priority": 8,
       "passes": true,
       "acceptanceCriteria": [
-        "scenarios/ec2-unreachable.yaml이 DKR v1 스키마를 준수하고 EC2-SYSTEM-CHECK/INSTANCE-CHECK/SG-BLOCK root_causes가 있음",
-        "scenarios/s3-access-denied.yaml이 DKR v1 스키마를 준수하고 S3-IAM/BUCKET-POLICY/CROSS-ACCOUNT/KMS/BPA root_causes가 있음",
-        "scenarios/cloudfront-issue.yaml이 DKR v1 스키마를 준수하고 CF-ORIGIN/CACHE-STALE/CERT/WAF root_causes가 있음",
-        "scenarios/control-plane-failure.yaml이 DKR v1 스키마를 준수하고 정적 안정성(Static Stability) 조치가 포함됨",
-        "scenarios/s3-public-exposure.yaml이 DKR v1 스키마를 준수하고 aws s3api put-public-access-block CLI가 포함됨",
-        "scenarios/network-unauthorized.yaml이 DKR v1 스키마를 준수하고 CloudTrail 기반 변경 감사 진단이 있음",
-        "총 20개 시나리오 DKR 파일이 scenarios/ 디렉토리에 존재함",
-        "6개 DKR 모두 remediation actions에 rollback_command가 포함됨"
-      ]
-    },
-    {
-      "id": "US-017",
-      "title": "Phase 4: Audit 파이프라인 (타임라인 + 포스트모템 템플릿)",
-      "phase": 4,
-      "priority": 17,
-      "passes": true,
-      "acceptanceCriteria": [
-        "audit/timeline-template.md가 존재하고 시간순 이벤트 기록 구조(timestamp, phase, action, evidence)가 정의됨",
-        "audit/postmortem-template.md가 존재하고 4개 필수 섹션(Executive Summary, Customer Impact, Timeline, Action Items)이 포함됨",
-        "postmortem-template.md의 Action Items에 owner/due-date/success-criterion/verification-method 필드가 정의됨",
-        "SKILL.md(golden source)의 Pipeline Step 5(Audit)가 audit/ 템플릿을 참조하도록 업데이트됨",
-        "Kiro 파생 SKILL.md도 동일하게 Audit 참조 업데이트됨"
+        "router dispatch table이 모든 phase를 커버하는지 확인됨",
+        "checkpoint.yaml phase enum이 dispatch table의 모든 phase를 포함하는지 확인됨",
+        "분할된 참조 파일 내 'Section N' 문자열이 남아있지 않음 (grep 검증)",
+        "모든 참조 파일 경로가 실제 존재하는 파일을 가리킴",
+        "handoff-schemas.yaml이 변경되지 않음 (git diff 검증)",
+        "aws-incident/SKILL.md가 변경되지 않음"
       ]
     }
   ]

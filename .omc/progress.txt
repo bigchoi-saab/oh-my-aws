@@ -53,3 +53,59 @@ Total: 14 DKR YAML files (12 new + 2 existing), covering all priority 1-2 scenar
 3. MCP config at .kiro/settings/mcp.json (not .kiro/mcp.json as originally assumed)
 4. AWS official MCP servers (awslabs.*) available via uvx - can be used immediately without custom MCP server
 5. autoApprove field in MCP config enables 3-tier approval gate without custom MCP protocol extensions
+
+---
+
+## Session: 2026-04-04 — TMT-Inspired Skill Improvements
+
+### Task
+TMT(Three-Man-Team) GitHub skill 분석 → oh-my-aws skill 시스템 개선 7개 항목 구현
+Plan: .omc/plans/tmt-skill-improvements.md (v2, RALPLAN 합의)
+
+### Phase 1 — COMPLETE
+- US-001: team-leader SKILL.md 분할 (399→62줄 phase-gated router + 7 참조파일)
+  - 5개 Section N 내부 참조 → 파일 경로 참조 교체 완료
+  - handoff-schemas.yaml 무변경, aws-incident 진입점 무변경
+
+### Phase 2 — COMPLETE
+- US-002: session-checkpoint.md 생성 (15 phase enum + error_context)
+- US-003: 5개 agent에 페르소나 추가 (각 19줄, 25줄 상한 준수)
+- US-004: Executor + CDK Engineer에 self-review 삽입 (별도 self-review.yaml 아티팩트)
+- US-005: scope-lock.md 생성 + Reporter known-gaps.yaml 배선
+
+### Phase 3 — COMPLETE
+- US-006: 토큰 규율 5규칙 (라우터 + agent-creation-protocol)
+- US-007: Foreground-only 규칙 (라우터 + agent-creation-protocol)
+
+### Phase 4 — COMPLETE
+- US-008: 통합 검증 6/6 PASS
+
+### Files Created
+- references/triage-protocol.md
+- references/agent-creation-protocol.md
+- references/execution-flow.md
+- references/approval-gate.md
+- references/cdk-protocol.md
+- references/error-handling.md
+- references/final-report-template.md
+- references/session-checkpoint.md
+- references/scope-lock.md
+
+### Files Modified
+- aws-team-leader/SKILL.md (399→62줄 phase-gated router)
+- agents/aws-diagnostician.md (+페르소나)
+- agents/aws-executor.md (+페르소나 +self-review)
+- agents/aws-reporter.md (+페르소나)
+- agents/aws-cdk-analyzer.md (+페르소나)
+- agents/aws-cdk-engineer.md (+페르소나 +self-review)
+
+### Learnings
+- Phase-gated dispatch table이 순차 목록보다 LLM의 선택적 로딩을 유도하는 데 효과적
+- Self-review를 핸드오프 계약(execution.yaml)이 아닌 별도 아티팩트로 분리하면 스키마 오염 방지
+- 페르소나 25줄 상한은 agent context 절약과 행동 유도 사이의 균형점
+- scope-lock.md는 phase-specific이 아닌 "항상 로드"로 배치해야 함 (범위 밖 발견은 모든 phase에서 가능)
+
+### Architect Verification: APPROVE (iteration 2)
+- 1st pass: REJECT (scope-lock.md dispatch table 참조 누락)
+- Fix: "항상 로드" 섹션에 scope-lock.md 추가
+- 2nd pass: APPROVE (14/14 criteria pass)
