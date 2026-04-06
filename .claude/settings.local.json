@@ -1,9 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Bash(mkdir -p /c/dev/oh-my-aws/.claude/agents)",
-      "Bash(mkdir -p /c/dev/oh-my-aws/.claude/skills/aws-cdk-operations)",
-      "Bash(mkdir -p /c/dev/oh-my-aws/.claude/skills/aws-incident)"
-    ]
-  }
-}
