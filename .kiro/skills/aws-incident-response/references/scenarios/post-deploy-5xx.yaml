@@ -1,0 +1,160 @@
+schema: decision-knowledge-record/v1
+
+metadata:
+  id: "post-deploy-5xx"
+  name: "배포 후 5xx 에러 급증"
+  description: "새 버전 배포 직후 API/LB 레벨에서 5xx 에러가 급증"
+  category: "deployment"
+  service: "multi"
+  severity: "critical"
+  tags: ["deployment", "rollback", "5xx", "codedeploy", "ecs", "lambda"]
+  source_refs:
+    - title: "CodeDeploy Rollbacks"
+      url: "https://docs.aws.amazon.com/codedeploy/latest/userguide/deployments-rollback-and-redeploy.html"
+      type: "official_doc"
+    - title: "ECS Deployment Circuit Breaker"
+      url: "https://docs.aws.amazon.com/AmazonECS/latest/developerguide/deployment-circuit-breaker.html"
+      type: "official_doc"
+
+triggers:
+  - type: "metric_threshold"
+    description: "배포 후 5xx 에러율 급증"
+    condition: "AWS/ApplicationELB.HTTPCode_ELB_5XX_Count.Sum > baseline × 3"
+
+symptoms:
+  - id: "s1"
+    description: "배포 시간과 에러 발생 시간 일치"
+    detection_method: "CloudTrail 배포 이력과 CW Metrics 상관"
+  - id: "s2"
+    description: "ALB 5xx 에러 급증"
+    metric: "AWS/ApplicationELB | HTTPCode_ELB_5XX_Count | Sum"
+  - id: "s3"
+    description: "ECS 서킷 브레이커 활성화 또는 Lambda Errors 증가"
+
+diagnosis:
+  decision_tree:
+    - step: 1
+      question: "최근 1시간 내 배포가 있었는가?"
+      check:
+        cli: |
+          aws cloudtrail lookup-events --lookup-attributes AttributeKey=EventName,AttributeValue=UpdateService \
+            --start-time <T-1h> --max-results 5
+      branches:
+        - condition: "배포 이력 존재"
+          result: "DEPLOY-CONFIRMED"
+          next_step: 2
+        - condition: "배포 이력 없음"
+          result: "NOT_DEPLOY"
+          next_step: 0
+    - step: 2
+      question: "에러가 특정 버전에 집중되는가?"
+      check:
+        cli: "태스크 정의 버전별 에러 분포 확인"
+      branches:
+        - condition: "새 버전에 에러 집중"
+          result: "DEPLOY-REGRESSION"
+          next_step: 0
+        - condition: "모든 버전에 에러"
+          result: "DEPLOY-RESOURCE"
+          next_step: 0
+
+root_causes:
+  - code: "DEPLOY-REGRESSION"
+    name: "배포된 코드 버그/회귀"
+    description: "새 버전의 코드 결함으로 인한 5xx 에러"
+    probability: "high"
+  - code: "DEPLOY-CONFIG"
+    name: "설정/환경변수 오류"
+    description: "새 배포의 환경 변수, 시크릿, 설정 불일치"
+    probability: "medium"
+  - code: "DEPLOY-RESOURCE"
+    name: "리소스 한계 (메모리/CPU/동시성)"
+    description: "새 버전의 리소스 요구량이 한계 초과"
+    probability: "medium"
+
+remediation:
+  - root_cause_code: "DEPLOY-REGRESSION"
+    actions:
+      - order: 1
+        name: "이전 버전으로 롤백"
+        type: "aws_cli"
+        command: |
+          # ECS
+          aws ecs update-service --cluster <CLUSTER> --service <SERVICE> \
+            --task-definition <PREVIOUS_TD_ARN> --force-new-deployment
+          # Lambda
+          aws lambda update-alias --function-name <FN> --name LIVE --function-version <PREV_VERSION>
+        rollback_command: |
+          aws ecs update-service --cluster <CLUSTER> --service <SERVICE> \
+            --task-definition <CURRENT_TD_ARN>
+        risk: "medium"
+        requires_approval: true
+        estimated_impact:
+          cost: "없음"
+          duration: "ECS 롤링 업데이트 5-10분, Lambda alias 전환 즉시"
+          blast_radius: "해당 서비스 단독 — 롤백 중 일부 요청이 신/구 버전 혼용 처리될 수 있음"
+
+  - root_cause_code: "DEPLOY-CONFIG"
+    actions:
+      - order: 1
+        name: "환경 변수/시크릿 비교 및 수정"
+        type: "manual"
+        command: "이전 버전과 현재 버전의 환경 설정 diff"
+        rollback_command: |
+          # 이전 환경 변수 복원: ECS 태스크 정의 재등록 또는 Lambda 환경 변수 원복
+          aws lambda update-function-configuration --function-name <FN> \
+            --environment Variables=<ORIGINAL_ENV_VARS>
+        risk: "low"
+        requires_approval: false
+        estimated_impact:
+          cost: "없음 — 설정 변경만"
+          duration: "1-3분 (ECS 서비스 업데이트 시 5-10분)"
+          blast_radius: "해당 서비스 단독, 재배포 없이 적용 가능"
+
+  - root_cause_code: "DEPLOY-RESOURCE"
+    actions:
+      - order: 1
+        name: "리소스 한계 증설 또는 롤백"
+        type: "aws_cli"
+        command: "Lambda memory/timeout 증설 또는 ECS 태스크 리소스 증설"
+        rollback_command: |
+          # Lambda 메모리 원복
+          aws lambda update-function-configuration --function-name <FN> \
+            --memory-size <ORIGINAL_MEMORY> --timeout <ORIGINAL_TIMEOUT>
+          # ECS 태스크 정의 이전 버전으로 롤백
+          aws ecs update-service --cluster <CLUSTER> --service <SERVICE> \
+            --task-definition <PREVIOUS_TD_ARN>
+        risk: "medium"
+        requires_approval: true
+        estimated_impact:
+          cost: "Lambda 메모리 증설 시 GB-초당 과금 증가, ECS CPU/메모리 증설 시 Fargate 요금 증가"
+          duration: "Lambda: 즉시 적용, ECS: 롤링 업데이트 5-15분"
+          blast_radius: "해당 서비스 단독, 롤링 업데이트 중 일부 용량 감소 가능"
+
+guardrails:
+  pre_conditions:
+    - description: "롤백 대상 버전이 정상 동작했음을 확인"
+      check: "이전 버전 배포 기간 동안 5xx 에러율 정상"
+      block: true
+    - description: "롤백 명령 및 이전 태스크 정의 ARN/Lambda 버전 준비 확인"
+      check: "PREVIOUS_TD_ARN 또는 PREV_VERSION 식별 완료"
+      block: true
+  post_conditions:
+    - description: "5xx 에러율 기준선 복귀"
+      check: "HTTPCode_ELB_5XX_Count < baseline for 5 minutes"
+      auto_rollback: false
+
+verification:
+  checks:
+    - name: "5xx 에러 해소"
+      expected: "5xx < baseline"
+    - name: "서비스 정상 동작"
+      expected: "UnHealthyHostCount = 0"
+  stability_window: 300
+  success_criteria: "5xx < baseline, UnHealthyHostCount = 0"
+
+escalation:
+  auto_remediate: false
+  approval_required: true
+  escalation_timeout: 300
+  notify: ["oncall", "dev-team"]

@@ -1,0 +1,208 @@
+schema: grading-rubric/v1
+
+# ═══════════════════════════════════════════════════════════════
+# grading-rubric/v1 — AWS 시험 응답 다층 채점 기준
+# ═══════════════════════════════════════════════════════════════
+# 용도: aws-grader Agent가 exam-submission을 채점할 때 참조
+# 원칙:
+#   - 5개 차원의 가중치 합은 정확히 1.0
+#   - 각 차원은 0-3 4단계 scoring 기준을 가짐
+#   - 실패 유형은 정확히 4가지 (Knowledge Gap, Reasoning Error, Priority Error, Procedural Error)
+#   - 각 실패 유형은 indicators 배열과 구체적 improvement_action을 가짐
+# 참조: .omc/plans/aws-exam-self-learning-pipeline.md § 단계 2.1
+# ═══════════════════════════════════════════════════════════════
+
+version: "1.0.0"
+
+dimensions:
+  - id: diagnosis_accuracy
+    name: "진단 정확도"
+    weight: 0.30
+    description: "올바른 root cause를 식별했는가?"
+    scoring:
+      3: "정확한 root cause 코드 식별 + 제시된 evidence와의 연결 근거 제시"
+      2: "관련 root cause 식별했으나 evidence 연결 근거 불충분"
+      1: "같은 카테고리 내 다른 root cause 식별 (완전한 오답은 아님)"
+      0: "완전히 다른 root cause 또는 미식별"
+
+  - id: action_appropriateness
+    name: "행동 적절성"
+    weight: 0.25
+    description: "권장 조치가 DKR remediation에 부합하는가?"
+    scoring:
+      3: "DKR 권장 조치와 일치 + 실행 순서 정확 + 가역성 고려"
+      2: "DKR 권장 조치와 부분 일치 (안전하지만 최적 아님)"
+      1: "안전하지만 DKR 권장 범위를 벗어난 대안 조치"
+      0: "위험한 조치 또는 완화 효과 없는 조치"
+
+  - id: reasoning_quality
+    name: "추론 품질"
+    weight: 0.20
+    description: "decision tree를 체계적으로 따랐는가?"
+    scoring:
+      3: "체계적 추론 + 증거 기반 분기 선택 + 반례 고려"
+      2: "추론 있으나 일부 단계 생략 또는 분기 근거 약함"
+      1: "결론으로 바로 점프 (추론 과정 부재)"
+      0: "비논리적 추론 또는 추론 없음"
+
+  - id: procedure_compliance
+    name: "절차 준수"
+    weight: 0.15
+    description: "guardrails, approval gate, verification을 준수했는가?"
+    scoring:
+      3: "모든 필수 절차 준수 + 근거 문서화 + rollback 경로 명시"
+      2: "주요 절차 준수, 일부 문서화 누락 (rollback 언급 부재 등)"
+      1: "절차 인식은 했으나 실행 지시 미흡"
+      0: "절차 무시 또는 위반 (승인 없는 HIGH risk 조치 등)"
+
+  - id: impact_awareness
+    name: "영향 범위 인식"
+    weight: 0.10
+    description: "조치의 영향 범위(비용, 하위 서비스, 다른 리소스)를 인식했는가?"
+    scoring:
+      3: "영향 범위 정확히 식별 + 완화 전략 제시 + 비용 고려"
+      2: "주요 영향은 인식, 일부 누락 (비용 또는 blast radius 한쪽만)"
+      1: "영향 범위 언급만, 구체성 부족"
+      0: "영향 범위 미인식"
+
+# 검증: 0.30 + 0.25 + 0.20 + 0.15 + 0.10 = 1.00
+
+# ═══════════════════════════════════════════════════════════════
+# Failure Types — 4가지 실패 유형
+# ═══════════════════════════════════════════════════════════════
+
+failure_types:
+  - id: knowledge_gap
+    name: "지식 부족"
+    description: "DKR에 정의된 사실/개념/기능을 모르거나 잘못 알고 있음"
+    indicators:
+      - "존재하지 않는 AWS 기능 언급 (예: 'Lambda SnapStart for Python')"
+      - "서비스 한계/기본값 오류 (예: 계정 동시성 기본값 오인)"
+      - "DKR root_cause 코드와 무관한 원인을 제시"
+      - "AWS 서비스명/API 이름 혼동"
+    improvement_action: "DKR 해당 섹션 보강 — 새 root_cause 추가, source_ref에 공식 문서 링크 추가, 또는 decision_tree의 check 부분에 구체적 CLI/API 예시 추가"
+    target_dkr_sections:
+      - "root_causes[].description"
+      - "metadata.source_refs"
+      - "diagnosis.decision_tree[].check"
+
+  - id: reasoning_error
+    name: "추론 오류"
+    description: "사실은 알고 있으나 evidence → conclusion 논리 연결이 잘못됨"
+    indicators:
+      - "증상에서 원인으로의 분기 선택 오류 (DKR decision_tree 분기 조건과 불일치)"
+      - "조건부 판단 실패 (A이면 B인데 C를 선택)"
+      - "상관관계와 인과관계 혼동 (예: 배포 시점 일치를 원인으로 단정)"
+      - "반례 고려 부족 (다른 가능한 원인 배제 근거 부재)"
+    improvement_action: "DKR diagnosis.decision_tree 분기 조건을 더 명확하게 표현 — condition 필드를 구체적 메트릭 임계값/로그 패턴으로 강화, 분기 간 상호 배타성 명시"
+    target_dkr_sections:
+      - "diagnosis.decision_tree[].branches[].condition"
+      - "diagnosis.decision_tree[].question"
+
+  - id: priority_error
+    name: "우선순위 오류"
+    description: "올바른 조치를 알지만 순서가 잘못됨 (예: 진단을 완화보다 먼저 수행)"
+    indicators:
+      - "완화(mitigation)보다 진단(investigation)을 먼저 수행 — mitigation-first 원칙 위반"
+      - "고위험 조치를 저위험 조치보다 먼저 시도"
+      - "approval_required 조치를 승인 없이 실행"
+      - "escalation 규칙 무시 (timeout 내 해결 안 될 때 oncall 통보 누락)"
+      - "가역성(reversibility) 낮은 조치를 우선 선택"
+    improvement_action: "DKR remediation.actions.order 정의 명확화 — order 필드 값이 실행 순서를 강제하도록 하고, guardrails.pre_conditions에 선행 조치 의존성 추가. escalation 규칙을 명시적으로 기술."
+    target_dkr_sections:
+      - "remediation[].actions[].order"
+      - "guardrails.pre_conditions"
+      - "escalation"
+
+  - id: procedural_error
+    name: "절차 위반"
+    description: "guardrails/approval/verification 절차를 누락하거나 위반"
+    indicators:
+      - "pre_conditions 확인 없이 조치 실행"
+      - "post_conditions/stability_window 미확인 (완료 선언 조기)"
+      - "rollback_command 준비 없이 조치 실행"
+      - "verification.checks 생략"
+      - "blast_radius/비용 영향 disclosure 누락"
+    improvement_action: "DKR guardrails 및 verification 체크리스트 보강 — pre_conditions에 block: true 플래그 명시, verification.checks에 구체적 메트릭 임계값과 stability_window 명시, remediation actions에 rollback_command 필수화"
+    target_dkr_sections:
+      - "guardrails.pre_conditions"
+      - "guardrails.post_conditions"
+      - "verification.checks"
+      - "remediation[].actions[].rollback_command"
+
+# ═══════════════════════════════════════════════════════════════
+# Scoring Algorithm (Grader가 구현해야 할 계산식)
+# ═══════════════════════════════════════════════════════════════
+# 1. 각 차원별 raw_score ∈ {0, 1, 2, 3} 부여
+# 2. dimension_weighted_score = (raw_score / 3) × weight
+# 3. total_weighted_score = Σ dimension_weighted_score ∈ [0.0, 1.0]
+# 4. 실패 판정 기준:
+#    - exact_match.correct == false → has_failure = true
+#    - total_weighted_score < 0.7 → has_failure = true (부분 정답 포함)
+#    - total_weighted_score ≥ 0.7 AND exact_match.correct == true → has_failure = false
+# 5. 복수 failure_type이 해당될 수 있음. primary_failure는 indicator 매칭 수가 가장 많은 유형으로 결정.
+# ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
+# Skill-Chain Dimensions — aws-exam-skill-chain-v2 / US-3
+# ═══════════════════════════════════════════════════════════════
+# 용도: aws-grader Phase 2.5 Skill-Chain Rubric Scoring에서만 사용
+# 조건: submission.track == skill_chain_v2 인 경우에만 적용
+# 주의: collection_fidelity 채점 시 observe.yaml에 sources_read와
+#       intended_commands 필드가 없으면 SILENT 0점이 아니라 명시적 오류로 처리.
+# ═══════════════════════════════════════════════════════════════
+
+skill_chain_dimensions:
+
+  - id: collection_fidelity
+    name: "수집 충실도"
+    description: "live AWS 모드에서 올바른 evidence를 수집했을지 여부. observe.yaml.sources_read와 intended_commands를 채점 근거로 사용."
+    scoring_target_fields:
+      - observe.yaml.sources_read
+      - observe.yaml.intended_commands
+    missing_field_policy: "FAIL_LOUD — sources_read 또는 intended_commands가 sim-mode observe.yaml에서 누락된 경우 점수 0이 아닌 명시적 오류를 grading_evidence.missing_sim_fields_error에 기록하고 run을 invalid로 표시"
+    scoring:
+      3: "intended_commands가 DKR ground truth에서 기대하는 AWS CLI 명령어와 완전 일치 (명령어 종류 + 필터 조건). sources_read가 진단에 충분한 fixture를 모두 포함."
+      2: "intended_commands가 부분 일치 (핵심 명령어 포함, 일부 필터 또는 보조 명령어 누락)"
+      1: "intended_commands가 관련은 있으나 DKR 기대 명령어와 카테고리 수준 불일치 (예: metrics는 맞는데 logs 명령어 누락)"
+      0: "intended_commands가 비어 있거나 완전히 무관한 명령어. sources_read만 있고 intended_commands 없는 경우도 0."
+
+  - id: reasoning_fidelity
+    name: "추론 충실도"
+    description: "주입된 fixture 기반으로 올바르게 진단했는지 여부. diagnosis.root_cause_code와 recommended_actions를 DKR ground truth와 대조."
+    scoring:
+      3: "root_cause_code가 DKR과 정확 일치 + top-3 recommended_actions 중 2개 이상 DKR remediation과 일치 (순서 무관)"
+      2: "root_cause_code 일치하나 recommended_actions 1개만 일치 또는 순서 오류"
+      1: "root_cause_code가 같은 카테고리 내 다른 코드 (완전 오답은 아님)"
+      0: "root_cause_code가 완전히 다른 카테고리 또는 미식별"
+
+  - id: chain_coverage
+    name: "체인 커버리지"
+    description: "파이프라인 5단계(observe/diagnose/execute/verify/report) 중 유효한 아티팩트를 생성한 단계 수. Phase 2A는 observe+diagnose만 가능하므로 최대 2단계."
+    phase_weights:
+      "2A": "observe(1) + diagnose(1) = 2단계 최대. execute/verify/report는 N/A (Phase 2C 이전)."
+      "2C": "5단계 전부 채점."
+    scoring:
+      3: "Phase 2A: observe+diagnose 모두 유효 아티팩트 존재. Phase 2C: 5단계 전부."
+      2: "Phase 2A: observe는 있으나 diagnosis.yaml 불완전. Phase 2C: 4단계."
+      1: "Phase 2A: observe만 있음. Phase 2C: 3단계 이하."
+      0: "유효 아티팩트 없음 또는 전부 오류."
+
+  - id: artifact_completeness
+    name: "아티팩트 완결성"
+    description: "생성된 각 아티팩트가 handoff-schemas.yaml의 해당 스키마 필수 필드를 모두 포함하는지 여부."
+    scoring:
+      3: "모든 생성된 아티팩트가 스키마 필수 필드를 완전히 충족. sim-mode 필수 필드(sources_read, intended_commands)도 포함."
+      2: "주요 필수 필드 충족, 일부 옵션 필드 또는 sim-mode 필드 누락"
+      1: "필수 필드 중 일부 누락 (채점은 가능하나 불완전)"
+      0: "스키마 위반 또는 필수 필드 대부분 누락"
+
+# ═══════════════════════════════════════════════════════════════
+# Failure Type → Improvement Priority 매핑
+# ═══════════════════════════════════════════════════════════════
+# - knowledge_gap: medium (새 개념이지만 한 번 추가하면 재발 낮음)
+# - reasoning_error: high (잘못된 판단이 반복될 가능성)
+# - priority_error: high (잘못된 순서는 운영 리스크 직접 유발)
+# - procedural_error: high (안전성 저해 — 즉시 개선 필요)
+# 단, 2회 이상 반복 실패는 전부 high로 승격
+# ═══════════════════════════════════════════════════════════════

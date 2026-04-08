@@ -1,0 +1,78 @@
+schema: exam-question/v1
+
+question:
+  id: "exam-post-deploy-5xx-001"
+  version: "1.0.0"
+  type: multiple_choice
+
+  dkr_mapping:
+    scenario_id: "post-deploy-5xx"
+    tested_sections: [symptoms, diagnosis, remediation, guardrails]
+    root_cause_codes: ["DEPLOY-REGRESSION"]
+
+  scenario:
+    context: "E-커머스 플랫폼이 ECS Fargate 위에 checkout-service를 운영한다. 매일 여러 번 Blue/Green 배포가 진행된다. CloudWatch Alarm이 5xx 에러율 기준선을 모니터링한다."
+    situation: "15분 전 checkout-service의 새 태스크 정의가 배포되었다. 배포 직후 ALB의 HTTPCode_ELB_5XX_Count가 평상시 대비 5배로 증가했고, ECS 서비스 이벤트에 'circuit breaker triggered' 메시지는 아직 나타나지 않았다. 이전 태스크 정의 ARN은 여전히 계정에 존재한다."
+    evidence:
+      - type: metric
+        source: "AWS/ApplicationELB HTTPCode_ELB_5XX_Count"
+        value: "배포 이전 평균 20/min → 배포 이후 100/min"
+      - type: cli_output
+        source: "aws cloudtrail lookup-events (UpdateService)"
+        value: "15분 전 UpdateService 이벤트 1건"
+      - type: cli_output
+        source: "aws ecs describe-services"
+        value: "deployments: [PRIMARY (newTD), ACTIVE (prevTD)] — 롤링 진행 중"
+      - type: log
+        source: "애플리케이션 로그"
+        value: "새 버전 태스크에서 NullPointerException 빈도 높음"
+    constraint: "비즈니스 영향이 즉시 발생 중이므로 장시간 진단보다는 mitigation-first 접근이 필요하다. 단, 롤백 대상 이전 버전이 정상 동작했음이 기록으로 확인되어야 한다."
+
+  question_text: "이 상황에서 가장 먼저 수행해야 할 조치는 무엇인가?"
+
+  options:
+    - key: A
+      text: "애플리케이션 개발팀에 NullPointerException 분석을 요청하고 수정 패치가 준비될 때까지 기다린다."
+    - key: B
+      text: "ECS 서비스를 이전 태스크 정의 ARN으로 update-service --force-new-deployment 수행하여 즉시 롤백한다. 롤백 대상 버전이 배포 이전에 정상 동작했음을 사전 확인한다."
+    - key: C
+      text: "ALB의 5xx 알람 임계값을 일시적으로 상향 조정하여 알람을 해제한다."
+    - key: D
+      text: "태스크 desired count를 기존의 2배로 늘려 처리량을 확보한다."
+
+  correct_answers: ["B"]
+  answer_count: 1
+
+  grading:
+    difficulty: easy
+    scoring_dimensions:
+      - dimension: action_appropriateness
+        weight: 0.35
+      - dimension: procedure_compliance
+        weight: 0.30
+      - dimension: reasoning_quality
+        weight: 0.20
+      - dimension: impact_awareness
+        weight: 0.15
+
+  provenance:
+    origin: "oh-my-aws-dkr-derived"
+    dkr_version: "decision-knowledge-record/v1"
+    created_date: "2026-04-05"
+    author: "oh-my-aws-exam-generator"
+
+  certification_alignment:
+    - exam: "DOP-C02"
+      domain: "Domain 5: Incident and Event Response"
+      task_statement: "Troubleshoot deployment issues and restore operations"
+
+  distractor_analysis:
+    - key: A
+      trap_type: common_misconception
+      explanation: "진단보다 완화가 우선(mitigation-first). 비즈니스 영향 중에 개발 대기는 잘못된 우선순위."
+    - key: C
+      trap_type: common_misconception
+      explanation: "알람 임계값 조정은 문제 은폐이며 사용자 영향은 그대로 지속된다."
+    - key: D
+      trap_type: plausible_but_wrong
+      explanation: "새 버전의 코드 결함이 원인이므로 인스턴스 증설은 오류 발생을 늘릴 뿐이다."

@@ -1,0 +1,186 @@
+schema: decision-knowledge-record/v1
+
+metadata:
+  id: "ec2-unreachable"
+  name: "EC2 인스턴스 접근 불가"
+  description: "EC2 인스턴스가 SSH/RDP/HTTP 연결에 응답하지 않음"
+  category: "compute"
+  service: "ec2"
+  severity: "high"
+  tags: ["ec2", "unreachable", "ssh", "status-check", "sg"]
+  source_refs:
+    - title: "EC2 Troubleshoot Instance Connection"
+      url: "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/TroubleshootingInstancesConnecting.html"
+      type: "official_doc"
+    - title: "EC2 Status Checks"
+      url: "https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/monitoring-system-instance-status-check.html"
+      type: "official_doc"
+
+triggers:
+  - type: "metric_threshold"
+    description: "StatusCheckFailed 메트릭 > 0 또는 ALB UnHealthyHostCount 증가"
+    condition: "AWS/EC2.StatusCheckFailed.Sum > 0 for 2 periods"
+    metrics:
+      - namespace: "AWS/EC2"
+        metric_name: "StatusCheckFailed"
+        statistic: "Sum"
+        period: 60
+        threshold: 0
+
+symptoms:
+  - id: "s1"
+    description: "StatusCheckFailed_Instance > 0 (OS/앱 수준)"
+    detection_method: "CloudWatch Metrics"
+    metric: "AWS/EC2 | StatusCheckFailed_Instance | Sum"
+  - id: "s2"
+    description: "StatusCheckFailed_System > 0 (AWS 인프라 수준)"
+    detection_method: "CloudWatch Metrics"
+    metric: "AWS/EC2 | StatusCheckFailed_System | Sum"
+  - id: "s3"
+    description: "SSH/RDP 연결 타임아웃"
+    detection_method: "사용자 보고 또는 자동 헬스체크"
+
+diagnosis:
+  decision_tree:
+    - step: 1
+      question: "System Status Check 실패인가?"
+      check:
+        metric: "AWS/EC2 | StatusCheckFailed_System | Sum"
+      branches:
+        - condition: "StatusCheckFailed_System > 0"
+          result: "EC2-SYSTEM-CHECK"
+          next_step: 0
+        - condition: "StatusCheckFailed_System = 0"
+          result: "NOT_SYSTEM"
+          next_step: 2
+    - step: 2
+      question: "Security Group이 SSH/RDP 포트를 허용하는가?"
+      check:
+        cli: |
+          aws ec2 describe-instances --instance-ids <INSTANCE_ID> \
+            --query 'Reservations[0].Instances[0].SecurityGroups[*].GroupId' \
+            --output text | xargs -I{} aws ec2 describe-security-groups \
+            --group-ids {} --query 'SecurityGroups[*].IpPermissions'
+      branches:
+        - condition: "해당 포트(22/3389)에 대한 인바운드 규칙 없음"
+          result: "EC2-SG-BLOCK"
+          next_step: 0
+        - condition: "SG 규칙 정상"
+          result: "EC2-INSTANCE-CHECK"
+          next_step: 0
+
+root_causes:
+  - code: "EC2-SYSTEM-CHECK"
+    name: "AWS 시스템 상태 검사 실패"
+    description: "AWS 인프라 문제 (네트워크, 전원, 하드웨어)"
+    probability: "low"
+    related_symptoms: ["s2"]
+  - code: "EC2-INSTANCE-CHECK"
+    name: "인스턴스 상태 검사 실패 (OS/앱)"
+    description: "OS 커널 패닉, 디스크 풀, 네트워크 설정 오류 등"
+    probability: "medium"
+    related_symptoms: ["s1", "s3"]
+  - code: "EC2-SG-BLOCK"
+    name: "Security Group 차단"
+    description: "필요한 포트에 대한 인바운드 규칙 누락"
+    probability: "medium"
+    related_symptoms: ["s3"]
+
+remediation:
+  - root_cause_code: "EC2-SYSTEM-CHECK"
+    actions:
+      - order: 1
+        name: "인스턴스 stop/start (기반 호스트 마이그레이션)"
+        type: "aws_cli"
+        command: |
+          aws ec2 stop-instances --instance-ids <INSTANCE_ID>
+          aws ec2 wait instance-stopped --instance-ids <INSTANCE_ID>
+          aws ec2 start-instances --instance-ids <INSTANCE_ID>
+        rollback_command: |
+          # stop/start는 롤백 불가 — 새 호스트에서 시작됨
+        risk: "medium"
+        requires_approval: true
+        estimated_impact:
+          cost: "없음 (EIP 미사용 시 공용 IP 변경)"
+          duration: "stop 30-60초 + start 60-120초 = 총 2-5분 중단"
+          blast_radius: "해당 인스턴스 단독 — ALB Target Group에서 자동 드레이닝 후 재등록"
+      - order: 2
+        name: "콘솔 스크린샷 확인"
+        type: "aws_cli"
+        command: |
+          aws ec2 get-console-screenshot --instance-id <INSTANCE_ID>
+        risk: "low"
+        requires_approval: false
+
+  - root_cause_code: "EC2-INSTANCE-CHECK"
+    actions:
+      - order: 1
+        name: "시스템 로그 확인"
+        type: "aws_cli"
+        command: |
+          aws ec2 get-console-output --instance-id <INSTANCE_ID> --latest
+        risk: "low"
+        requires_approval: false
+        estimated_impact:
+          cost: "없음 — 읽기 전용"
+          duration: "즉시"
+          blast_radius: "없음 — 진단 전용"
+      - order: 2
+        name: "Session Manager로 접속 시도"
+        type: "aws_cli"
+        command: |
+          aws ssm start-session --target <INSTANCE_ID>
+        risk: "low"
+        requires_approval: false
+        estimated_impact:
+          cost: "없음"
+          duration: "즉시"
+          blast_radius: "없음 — 읽기 전용 접속"
+
+  - root_cause_code: "EC2-SG-BLOCK"
+    actions:
+      - order: 1
+        name: "Security Group 인바운드 규칙 확인 및 수정"
+        type: "aws_cli"
+        command: |
+          aws ec2 authorize-security-group-ingress \
+            --group-id <SG_ID> --protocol tcp --port 22 --cidr <ALLOWED_CIDR>
+        rollback_command: |
+          aws ec2 revoke-security-group-ingress \
+            --group-id <SG_ID> --protocol tcp --port 22 --cidr <ALLOWED_CIDR>
+        risk: "medium"
+        requires_approval: true
+        estimated_impact:
+          cost: "없음"
+          duration: "즉시 (SG 규칙 전파 수초)"
+          blast_radius: "해당 SG를 공유하는 모든 인스턴스에 적용 — SG 공유 범위 사전 확인 필요"
+
+guardrails:
+  pre_conditions:
+    - description: "stop/start 전 영향받는 서비스 확인"
+      check: "인스턴스가 포함된 ALB Target Group 확인"
+      block: true
+    - description: "SG 변경 시 0.0.0.0/0 허용 금지"
+      check: "cidr != '0.0.0.0/0'"
+      block: true
+  post_conditions:
+    - description: "StatusCheckFailed = 0 확인"
+      check: "AWS/EC2.StatusCheckFailed.Sum = 0 for 5 minutes"
+      auto_rollback: false
+
+verification:
+  checks:
+    - name: "상태 검사 통과"
+      method: "CloudWatch Metrics"
+      expected: "StatusCheckFailed = 0 for 5 minutes"
+    - name: "SSH/HTTP 연결 가능"
+      method: "수동 또는 자동 헬스체크"
+      expected: "연결 성공"
+  stability_window: 300
+  success_criteria: "StatusCheckFailed = 0, 연결 복원"
+
+escalation:
+  auto_remediate: false
+  approval_required: true
+  escalation_timeout: 600
+  notify: ["oncall"]

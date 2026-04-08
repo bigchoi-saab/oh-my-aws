@@ -1,0 +1,203 @@
+schema: decision-knowledge-record/v1
+
+metadata:
+  id: "lambda-timeout-cold-start"
+  name: "Lambda 콜드 스타트로 인한 타임아웃"
+  description: "Lambda 함수의 초기화(Init) 시간이 과도하여 실행 타임아웃 발생"
+  category: "compute"
+  service: "lambda"
+  severity: "high"
+  tags: ["lambda", "timeout", "cold-start", "latency", "serverless"]
+  source_refs:
+    - title: "Lambda Troubleshooting - Invocation Issues"
+      url: "https://docs.aws.amazon.com/lambda/latest/dg/troubleshooting-invocation.html"
+      type: "troubleshooting_guide"
+    - title: "Lambda Provisioned Concurrency"
+      url: "https://docs.aws.amazon.com/lambda/latest/dg/provisioned-concurrency.html"
+      type: "official_doc"
+    - title: "Well-Architected Serverless Lens - Lambda Performance"
+      url: "https://docs.aws.amazon.com/wellarchitected/latest/serverless-applications-lens/aws-lambda-2.html"
+      type: "well_architected"
+    - title: "Lambda Troubleshoot Invocation Timeouts (re:Post)"
+      url: "https://repost.aws/knowledge-center/lambda-troubleshoot-invocation-timeouts"
+      type: "repost_kc"
+
+triggers:
+  - type: "log_pattern"
+    description: "Lambda 로그에 timeout 메시지 발생"
+    condition: "@message like 'Task timed out' OR @message like 'Status: timeout'"
+    log_query: |
+      fields @timestamp, @requestId, @message, @logStream
+      | filter @message like "Status: timeout"
+      | sort @timestamp desc
+      | limit 100
+
+symptoms:
+  - id: "s1"
+    description: "Init Duration이 실행 시간의 50% 이상"
+    detection_method: "CloudWatch Logs에서 Init Duration 필드 확인"
+    log_query: |
+      filter @type = "REPORT"
+      | stats max(@initDuration) as maxInit, avg(@initDuration) as avgInit, avg(@duration) as avgDuration
+      | eval initRatio = maxInit / (maxInit + avgDuration)
+  - id: "s2"
+    description: "Duration p95/p99가 설정 타임아웃에 근접"
+    detection_method: "CloudWatch Metrics 확인"
+    metric: "AWS/Lambda | Duration | p95"
+  - id: "s3"
+    description: "첫 번째 호출 또는 장기 유휴 후 호출에서만 발생"
+    detection_method: "시간 패턴 분석"
+
+diagnosis:
+  decision_tree:
+    - step: 1
+      question: "Init Duration이 비정상적으로 긴가?"
+      check:
+        log_query: |
+          filter @type = "REPORT"
+          | stats max(@initDuration) by bin(5m)
+      branches:
+        - condition: "Init Duration > 1초 (Python) 또는 > 5초 (Java)"
+          result: "COLD-START-CONFIRMED"
+          next_step: 2
+        - condition: "Init Duration 정상"
+          result: "NOT_COLD_START"
+          next_step: 0
+    - step: 2
+      question: "함수 런타임이 Java인가?"
+      check:
+        api: "GetFunctionConfiguration → Runtime"
+      branches:
+        - condition: "Runtime starts with 'java'"
+          result: "JAVA_COLD_START"
+          next_step: 3
+        - condition: "Other runtime"
+          result: "GENERAL_COLD_START"
+          next_step: 4
+    - step: 3
+      question: "SnapStart가 활성화되어 있는가?"
+      check:
+        api: "GetFunctionConfiguration → SnapStart"
+      branches:
+        - condition: "SnapStart not configured"
+          result: "TIMEOUT-COLD-JAVA-NOSNAP"
+          next_step: 0
+        - condition: "SnapStart configured"
+          result: "TIMEOUT-COLD-OTHER"
+          next_step: 4
+
+root_causes:
+  - code: "TIMEOUT-COLD-JAVA-NOSNAP"
+    name: "Java 런타임 콜드 스타트 (SnapStart 미사용)"
+    description: "Java Lambda에서 SnapStart 미활성화로 인한 긴 초기화 시간"
+    probability: "high"
+    related_symptoms: ["s1", "s2", "s3"]
+  - code: "TIMEOUT-COLD-GENERAL"
+    name: "일반 콜드 스타트 (의존성 과다)"
+    description: "함수의 의존성/레이어 크기가 커서 초기화 시간 과다"
+    probability: "medium"
+    related_symptoms: ["s1", "s2", "s3"]
+
+remediation:
+  - root_cause_code: "TIMEOUT-COLD-JAVA-NOSNAP"
+    actions:
+      - order: 1
+        name: "SnapStart 활성화"
+        description: "Java Lambda의 초기화 단계를 사전 실행하여 콜드 스타트 제거"
+        type: "aws_cli"
+        command: |
+          aws lambda update-function-configuration \
+            --function-name <FUNCTION_NAME> \
+            --snap-start ApplyOn=PublishedVersions
+        rollback_command: |
+          aws lambda update-function-configuration \
+            --function-name <FUNCTION_NAME> \
+            --snap-start ApplyOn=None
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "비용 영향 없음 (SnapStart 자체 무료)"
+      - order: 2
+        name: "버전/별칭 게시 후 SnapStart 적용 확인"
+        description: "SnapStart는 Published Versions에만 적용됨"
+        type: "aws_cli"
+        command: |
+          aws lambda publish-version --function-name <FUNCTION_NAME>
+          aws lambda update-alias --function-name <FUNCTION_NAME> --name LIVE --function-version 1
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "없음"
+
+  - root_cause_code: "TIMEOUT-COLD-GENERAL"
+    actions:
+      - order: 1
+        name: "Provisioned Concurrency 활성화"
+        description: "사전 초기화된 실행 환경 유지하여 콜드 스타트 제거"
+        type: "aws_cli"
+        command: |
+          aws lambda put-provisioned-concurrency-config \
+            --function-name <FUNCTION_NAME> \
+            --qualifier <ALIAS_NAME> \
+            --provisioned-concurrent-executions <PC_COUNT>
+        rollback_command: |
+          aws lambda delete-provisioned-concurrency-config \
+            --function-name <FUNCTION_NAME> \
+            --qualifier <ALIAS_NAME>
+        risk: "medium"
+        requires_approval: true
+        estimated_impact: |
+          월 비용 = PC_COUNT × Memory_GB × $0.0000041667/GB-s × 2,592,000s
+          예: 5개 × 0.5GB × $0.0000041667 × 2,592,000 = 약 $27/월
+      - order: 2
+        name: "의존성/레이어 크기 최소화"
+        description: "불필요한 의존성 제거, Lazy Loading 적용"
+        type: "code_change"
+        command: "애플리케이션 코드 수정"
+        risk: "medium"
+        requires_approval: true
+        estimated_impact: "개발 공수 필요"
+    alternative_actions:
+      - name: "타임아웃 증설만으로 대응"
+        description: "Provisioned Concurrency 없이 타임아웃만 늘리기"
+        tradeoff: "비용 절감 but 첫 응답 지연 유지, SLA 위반 가능"
+
+guardrails:
+  pre_conditions:
+    - description: "Provisioned Concurrency 적용 전 비용 영향 계산"
+      check: "월 예상 비용을 사용자에게 표시"
+      block: true
+    - description: "Alias가 존재하는지 확인 (PC는 Alias에 적용)"
+      check: "aws lambda get-alias --function-name <FN> --name <ALIAS>"
+      block: true
+  post_conditions:
+    - description: "ProvisionedConcurrencySpilloverInvocations 확인"
+      check: "SpilloverInvocations ≈ 0"
+      auto_rollback: false
+
+verification:
+  checks:
+    - name: "타임아웃 메시지 소멸"
+      method: "CloudWatch Logs Insights 재쿼리"
+      expected: "Status: timeout 메시지 0건 (5분 윈도우)"
+      log_query: |
+        fields @timestamp, @message
+        | filter @message like "Status: timeout"
+        | stats count() by bin(5m)
+    - name: "Init Duration 감소"
+      method: "CloudWatch Logs"
+      expected: "Init Duration < 100ms (PC/SnapStart 적용 시)"
+    - name: "Duration p95 여유 확보"
+      method: "CloudWatch Metrics"
+      expected: "Duration p95 < timeout × 0.8"
+      metric:
+        namespace: "AWS/Lambda"
+        metric_name: "Duration"
+        statistic: "p95"
+        threshold: "< configured timeout × 0.8"
+  stability_window: 300
+  success_criteria: "타임아웃 메시지 0건, Duration p95 < timeout × 0.8"
+
+escalation:
+  auto_remediate: false
+  approval_required: true
+  escalation_timeout: 600
+  notify: ["oncall"]

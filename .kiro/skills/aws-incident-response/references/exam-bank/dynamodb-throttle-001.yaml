@@ -1,0 +1,81 @@
+schema: exam-question/v1
+
+question:
+  id: "exam-dynamodb-throttle-001"
+  version: "1.0.0"
+  type: multiple_choice
+
+  dkr_mapping:
+    scenario_id: "dynamodb-throttle"
+    tested_sections: [symptoms, diagnosis, root_causes, remediation]
+    root_cause_codes: ["DDB-HOT-PARTITION"]
+
+  scenario:
+    context: "게임 리더보드 서비스가 DynamoDB 테이블 scores(파티션 키: game_id, 정렬 키: score)를 Provisioned 모드(RCU=500, WCU=500)로 운영한다."
+    situation: "월드컵 이벤트가 시작된 이후 game_id='WORLD_CUP_2026'에 대한 점수 업데이트와 조회가 집중되고 있다. ThrottledRequests가 급증하고 애플리케이션 로그에 ProvisionedThroughputExceededException이 다수 발생한다."
+    evidence:
+      - type: metric
+        source: "AWS/DynamoDB ThrottledRequests"
+        value: "Sum > 0 지속 발생"
+      - type: metric
+        source: "AWS/DynamoDB ConsumedWriteCapacityUnits by PartitionKey"
+        value: "game_id='WORLD_CUP_2026' 파티션이 전체 WCU의 92% 소비, 다른 파티션은 미미"
+      - type: metric
+        source: "AWS/DynamoDB 전체 ConsumedWriteCapacityUnits"
+        value: "평균 약 220 WCU (할당 500 WCU의 44%)"
+      - type: log
+        source: "애플리케이션 로그"
+        value: "ProvisionedThroughputExceededException: The level of configured provisioned throughput for the table was exceeded"
+    constraint: "사용자 경험 저하 없이 실시간 이벤트 기간 동안 안정적으로 운영해야 한다."
+
+  question_text: "이 상황의 root cause와 가장 적절한 즉시 완화 조치는 무엇인가?"
+
+  options:
+    - key: A
+      text: "전체 용량 부족이므로 WCU를 1000으로 증설한다."
+    - key: B
+      text: "특정 파티션에 트래픽이 집중된 핫 파티션 문제이므로 On-Demand 모드로 긴급 전환하여 즉시 쓰로틀을 완화하고, 근본 해결은 파티션 키 재설계로 별도 계획한다."
+    - key: C
+      text: "Auto Scaling을 활성화하여 용량이 자동 증설되도록 한다."
+    - key: D
+      text: "GSI(Global Secondary Index)를 생성하여 읽기 부하를 분산한다."
+
+  correct_answers: ["B"]
+  answer_count: 1
+
+  grading:
+    difficulty: hard
+    scoring_dimensions:
+      - dimension: diagnosis_accuracy
+        weight: 0.35
+      - dimension: action_appropriateness
+        weight: 0.25
+      - dimension: reasoning_quality
+        weight: 0.20
+      - dimension: impact_awareness
+        weight: 0.20
+
+  provenance:
+    origin: "oh-my-aws-dkr-derived"
+    dkr_version: "decision-knowledge-record/v1"
+    created_date: "2026-04-05"
+    author: "oh-my-aws-exam-generator"
+
+  certification_alignment:
+    - exam: "SAA-C03"
+      domain: "Domain 3: Design High-Performing Architectures"
+      task_statement: "Determine high-performing database solutions"
+    - exam: "SAP-C02"
+      domain: "Domain 3: Continuous Improvement for Existing Solutions"
+      task_statement: "Troubleshoot and optimize performance"
+
+  distractor_analysis:
+    - key: A
+      trap_type: plausible_but_wrong
+      explanation: "전체 활용률이 44%이므로 용량 증설은 핫 파티션 문제를 해결하지 못한다. 파티션 레벨 한도에 걸린다."
+    - key: C
+      trap_type: plausible_but_wrong
+      explanation: "Auto Scaling도 전체 용량만 조정하며 파티션 불균형을 해결하지 못한다."
+    - key: D
+      trap_type: common_misconception
+      explanation: "GSI는 쓰기 부하를 오히려 늘린다(쓰기 복제 비용). 읽기 분산에도 동일 파티션 키 쓰기 집중 문제는 해결 불가."

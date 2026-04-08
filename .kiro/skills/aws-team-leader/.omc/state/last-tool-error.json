@@ -1,0 +1,7 @@
+{
+  "tool_name": "Bash",
+  "tool_input_preview": "{\"command\":\"python3 -c \\\"\\nimport pathlib\\np = pathlib.Path('C:/dev/oh-my-aws/.claude/skills/aws-team-leader/SKILL.md')\\ncontent = p.read_text(encoding='utf-8')\\nlines = content.split('\\\\n')\\n# Fix th...",
+  "error": "Exit code 1\nTraceback (most recent call last):\r\n  File \"<string>\", line 4, in <module>\r\n  File \"C:\\Program Files\\Python312\\Lib\\pathlib.py\", line 1028, in read_text\r\n    return f.read()\r\n           ^^^^^^^^\r\n  File \"<frozen codecs>\", line 322, in decode\r\nUnicodeDecodeError: 'utf-8' codec can't decode byte 0xbf in position 678: invalid start byte",
+  "timestamp": "2026-04-06T02:44:18.726Z",
+  "retry_count": 2
+}

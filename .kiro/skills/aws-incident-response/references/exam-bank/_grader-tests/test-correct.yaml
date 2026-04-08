@@ -1,0 +1,89 @@
+schema: grader-test-case/v1
+
+# ═══════════════════════════════════════════════════════════════
+# Grader Test Case #1: 정답 응답
+# ═══════════════════════════════════════════════════════════════
+# 목적: Grader가 완전 정답 + 체계적 추론에 대해 높은 점수를 주는지 검증
+# 참조 문제: exam-lambda-throttle-001 (Reserved Concurrency=0 설정 실수)
+# 참조 DKR: lambda-throttle-concurrency-exhaustion
+# 기대 결과: exact_match true, total_weighted_score >= 0.8, has_failure false
+# ═══════════════════════════════════════════════════════════════
+
+test_id: "grader-test-correct"
+description: "완전 정답 + 체계적 추론 — Grader가 full credit을 주어야 함"
+
+# ─── 입력: question (exam-question/v1 subset) ───
+question:
+  id: "exam-lambda-throttle-001"
+  type: multiple_choice
+  dkr_mapping:
+    scenario_id: "lambda-throttle-concurrency-exhaustion"
+    root_cause_codes: ["THROTTLE-RESV-ZERO"]
+  correct_answers: ["B"]
+  answer_count: 1
+  grading:
+    difficulty: easy
+    scoring_dimensions:
+      - dimension: diagnosis_accuracy
+        weight: 0.50
+      - dimension: action_appropriateness
+        weight: 0.30
+      - dimension: reasoning_quality
+        weight: 0.20
+
+# ─── 입력: submission (exam-submission subset) ───
+submission:
+  run_id: "run-2026-04-05T10-00"
+  question_id: "exam-lambda-throttle-001"
+  scenario_id: "lambda-throttle-concurrency-exhaustion"
+  selected_answers: ["B"]
+  reasoning: |
+    증거에 따르면:
+    (1) payment-processor 함수만 Throttles > 0이고 다른 함수는 정상이므로 계정 레벨 문제가 아니다.
+    (2) 계정 ConcurrentExecutions 한도는 1000이고 UnreservedConcurrentExecutions가 950이므로 계정 여유는 충분하다.
+    (3) get-function-concurrency 결과 ReservedConcurrentExecutions가 0으로 설정되어 있다.
+    Reserved Concurrency가 0이면 함수가 완전히 차단된다. 원인은 설정 실수(root_cause: THROTTLE-RESV-ZERO)이며,
+    가장 빠른 완화는 해당 설정을 삭제하는 것이다. 계정 한도 증설(A)이나 PC 추가(C), 이벤트 소스 추가(D)는 모두 근본 원인과 무관하다.
+  decision_trace:
+    - step: 1
+      observation: "payment-processor만 Throttles > 0"
+      hypothesis: "함수 레벨 문제"
+      eliminated_options: ["계정 레벨 한도"]
+    - step: 2
+      observation: "ReservedConcurrentExecutions: 0"
+      hypothesis: "Reserved=0 실수 (THROTTLE-RESV-ZERO)"
+      eliminated_options: ["버스트 트래픽", "이벤트 소스 병목"]
+    - step: 3
+      observation: "계정 한도 여유 950"
+      hypothesis: "계정 증설 불필요"
+      eliminated_options: ["A", "C", "D"]
+  dkr_access_log:
+    dkr_files_read: false
+    allowed_references: ["exam-bank/lambda-throttle-001.yaml"]
+  timestamp: "2026-04-05T10:05:00Z"
+
+# ─── 기대 결과: Grader가 생성해야 할 exam-result ───
+expected:
+  exact_match:
+    correct: true
+    expected: ["B"]
+    actual: ["B"]
+  total_weighted_score_min: 0.80     # >= 0.80 요구
+  dimension_scores_expectations:
+    - dimension_id: diagnosis_accuracy
+      min_score: 3                   # 3/3 요구 (정확한 root_cause 코드 언급 + 근거)
+    - dimension_id: action_appropriateness
+      min_score: 2                   # 2 이상 (DKR remediation과 일치)
+    - dimension_id: reasoning_quality
+      min_score: 2                   # 2 이상 (체계적 decision_trace)
+  failure_analysis:
+    has_failure: false
+    failure_types: []
+    primary_failure: null
+
+# ─── 검증 기준 ───
+validation:
+  - "Grader 출력의 exam-result.exact_match.correct == true"
+  - "Grader 출력의 exam-result.total_weighted_score >= 0.80"
+  - "Grader 출력의 exam-result.failure_analysis.has_failure == false"
+  - "diagnosis_accuracy 차원에서 score == 3 (THROTTLE-RESV-ZERO 정확히 지목)"

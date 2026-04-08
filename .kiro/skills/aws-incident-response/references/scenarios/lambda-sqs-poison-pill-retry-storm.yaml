@@ -1,0 +1,243 @@
+schema: decision-knowledge-record/v1
+
+metadata:
+  id: "lambda-sqs-poison-pill-retry-storm"
+  name: "SQS 포이즌 필 메시지로 인한 Lambda 재시도 폭주"
+  description: "SQS에서 처리 불가능한 메시지가 반복 재시도되면서 정상 메시지 처리까지 방해"
+  category: "compute"
+  service: "lambda"
+  severity: "high"
+  tags: ["lambda", "sqs", "poison-pill", "dlq", "retry", "batch"]
+  source_refs:
+    - title: "Lambda SQS Error Handling"
+      url: "https://docs.aws.amazon.com/lambda/latest/dg/services-sqs-errorhandling.html"
+      type: "official_doc"
+    - title: "Lambda SQS Scaling"
+      url: "https://docs.aws.amazon.com/lambda/latest/dg/services-sqs-scaling.html"
+      type: "official_doc"
+    - title: "Prescriptive Guidance - Partial Batch Response Best Practices"
+      url: "https://docs.aws.amazon.com/prescriptive-guidance/latest/lambda-event-filtering-partial-batch-responses-for-sqs/best-practices-partial-batch-responses.html"
+      type: "prescriptive_guidance"
+    - title: "Lambda Retrying Valid SQS Messages (re:Post)"
+      url: "https://repost.aws/knowledge-center/lambda-retrying-valid-sqs-messages"
+      type: "repost_kc"
+    - title: "Lambda Idempotent Functions (re:Post)"
+      url: "https://repost.aws/knowledge-center/lambda-function-idempotent"
+      type: "repost_kc"
+
+triggers:
+  - type: "metric_threshold"
+    description: "SQS 대기열 길이 증가 + DLQ 메시지 급증"
+    condition: "SQS.ApproximateNumberOfMessagesNotVisible 증가 AND SQS NumberOfMessagesReceived >> NumberOfMessagesDeleted"
+    metrics:
+      - namespace: "AWS/SQS"
+        metric_name: "ApproximateNumberOfMessagesNotVisible"
+        statistic: "Average"
+        period: 300
+        threshold: "급증 추세"
+      - namespace: "AWS/SQS"
+        metric_name: "ApproximateNumberOfMessagesVisible"
+        statistic: "Average"
+        period: 300
+        threshold: "지속 증가"
+
+symptoms:
+  - id: "s1"
+    description: "SQS 대기열 메시지 수 지속 증가"
+    detection_method: "CloudWatch Metrics"
+    metric: "AWS/SQS | ApproximateNumberOfMessagesVisible | Average"
+  - id: "s2"
+    description: "DLQ에 유효한 메시지가 유입됨"
+    detection_method: "DLQ 메시지 검사"
+    cli: "aws sqs receive-message --queue-url <DLQ_URL> --max-number-of-messages 10"
+  - id: "s3"
+    description: "Lambda가 동일 메시지를 반복 처리"
+    detection_method: "CloudWatch Logs에서 messageId 중복 확인"
+    log_query: |
+      fields @timestamp, @message
+      | parse @message "* messageId: *" as timestamp, messageId
+      | stats count() by messageId
+      | filter count > 1
+      | sort count desc
+
+diagnosis:
+  decision_tree:
+    - step: 1
+      question: "ReportBatchItemFailures가 활성화되어 있는가?"
+      check:
+        cli: |
+          aws lambda get-event-source-mapping --uuid <UUID> --query 'FunctionResponseTypes'
+      branches:
+        - condition: "ReportBatchItemFailures NOT in list"
+          result: "MISSING_PARTIAL_BATCH"
+          next_step: 3
+        - condition: "ReportBatchItemFailures present"
+          result: "PARTIAL_BATCH_ENABLED"
+          next_step: 2
+    - step: 2
+      question: "DLQ가 설정되어 있는가?"
+      check:
+        cli: "aws sqs get-queue-attributes --queue-url <QUEUE_URL> --attribute-names RedrivePolicy"
+      branches:
+        - condition: "RedrivePolicy exists"
+          result: "DLQ_CONFIGURED"
+          next_step: 3
+        - condition: "No RedrivePolicy"
+          result: "NO_DLQ"
+          next_step: 3
+    - step: 3
+      question: "Visibility Timeout이 Lambda 타임아웃의 6배 이상인가?"
+      check:
+        cli: |
+          aws sqs get-queue-attributes --queue-url <QUEUE_URL> --attribute-names VisibilityTimeout
+          aws lambda get-function-configuration --function-name <FN> --query 'Timeout'
+      branches:
+        - condition: "VisibilityTimeout < 6 × LambdaTimeout"
+          result: "VISIBILITY_TIMEOUT_MISCONFIGURED"
+          next_step: 0
+        - condition: "VisibilityTimeout >= 6 × LambdaTimeout"
+          result: "VISIBILITY_OK"
+          next_step: 0
+
+root_causes:
+  - code: "POISON-MISSING-PARTIAL-BATCH"
+    name: "Partial Batch Response 미활성화"
+    description: "배치 내 일부 메시지 실패 시 전체 배치가 재시도되어 정상 메시지도 반복 처리됨"
+    probability: "high"
+    related_symptoms: ["s1", "s2", "s3"]
+  - code: "POISON-NO-DLQ"
+    name: "DLQ 미설정"
+    description: "최대 재시도 초과 후 메시지가 손실됨"
+    probability: "medium"
+    related_symptoms: ["s2"]
+  - code: "POISON-VISIBILITY"
+    name: "Visibility Timeout 오설정"
+    description: "Visibility Timeout이 너무 짧아 처리 중인 메시지가 다시 큐에 노출됨"
+    probability: "medium"
+    related_symptoms: ["s1", "s3"]
+  - code: "POISON-NO-IDEMPOTENCY"
+    name: "멱등성(Idempotency) 미보장"
+    description: "재시도 시 동일 작업이 중복 실행됨"
+    probability: "medium"
+    related_symptoms: ["s3"]
+
+remediation:
+  - root_cause_code: "POISON-MISSING-PARTIAL-BATCH"
+    actions:
+      - order: 1
+        name: "ReportBatchItemFailures 활성화"
+        description: "배치 내 실패한 메시지만 재시도되도록 설정"
+        type: "aws_cli"
+        command: |
+          aws lambda update-event-source-mapping \
+            --uuid <UUID> \
+            --function-response-types ReportBatchItemFailures
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "Lambda 코드에서 batchItemFailures 응답 필요"
+      - order: 2
+        name: "Lambda 코드 수정 - partial batch response 반환"
+        description: "실패한 메시지 ID를 포함한 응답 형식으로 코드 수정"
+        type: "code_change"
+        command: |
+          # Python 예시
+          return {
+              "batchItemFailures": [
+                  {"itemIdentifier": failed_message_id}
+              ]
+          }
+        risk: "medium"
+        requires_approval: true
+        estimated_impact: "코드 배포 필요"
+
+  - root_cause_code: "POISON-NO-DLQ"
+    actions:
+      - order: 1
+        name: "DLQ 생성 및 연결"
+        description: "최대 재시도 초과 메시지를 DLQ로 이동"
+        type: "aws_cli"
+        command: |
+          aws sqs create-queue --queue-name <QUEUE_NAME>-dlq
+          aws sqs set-queue-attributes \
+            --queue-url <QUEUE_URL> \
+            --attributes '{
+              "RedrivePolicy": "{\"deadLetterTargetArn\":\"<DLQ_ARN>\",\"maxReceiveCount\":\"5\"}"
+            }'
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "메시지 손실 방지, DLQ 모니터링 필요"
+
+  - root_cause_code: "POISON-VISIBILITY"
+    actions:
+      - order: 1
+        name: "Visibility Timeout 조정"
+        description: "Lambda 타임아웃의 6배 이상으로 설정 (AWS 권장)"
+        type: "aws_cli"
+        command: |
+          aws sqs set-queue-attributes \
+            --queue-url <QUEUE_URL> \
+            --attributes VisibilityTimeout=<6_TIMES_LAMBDA_TIMEOUT>
+        risk: "low"
+        requires_approval: false
+        estimated_impact: "메시지 재시도 간격 증가"
+
+  - root_cause_code: "POISON-NO-IDEMPOTENCY"
+    actions:
+      - order: 1
+        name: "멱등성 처리 로직 추가"
+        description: "메시지 ID 또는 비즈니스 키 기반 중복 실행 방지"
+        type: "code_change"
+        command: |
+          # AWS Lambda Powertools for Python - idempotency 예시
+          from aws_lambda_powertools.utilities.idempotency import idempotent
+
+          @idempotent
+          def handler(event, context):
+              pass
+        risk: "medium"
+        requires_approval: true
+        estimated_impact: "DynamoDB 비용 미발생 (idempotency store)"
+
+guardrails:
+  pre_conditions:
+    - description: "DLQ 설정 전 큐가 비어있는지 확인"
+      check: "ApproximateNumberOfMessagesVisible = 0 또는 영향 최소화 계획 수립"
+      block: false
+    - description: "Visibility Timeout 변경 시 처리 중인 메시지 영향 확인"
+      check: "ApproximateNumberOfMessagesNotVisible 확인"
+      block: false
+  post_conditions:
+    - description: "DLQ에 유효 메시지 유입 중지 확인"
+      check: "DLQ 메시지 검사하여 모두 포이즌 필인지 확인"
+      auto_rollback: false
+    - description: "큐 처리 속도 정상화"
+      check: "NumberOfMessagesDeleted > 0 지속"
+      auto_rollback: false
+
+verification:
+  checks:
+    - name: "큐 대기 메시지 감소"
+      method: "CloudWatch Metrics"
+      expected: "ApproximateNumberOfMessagesVisible 감소 추세"
+      metric:
+        namespace: "AWS/SQS"
+        metric_name: "ApproximateNumberOfMessagesVisible"
+        statistic: "Average"
+        threshold: "감소 추세"
+    - name: "DLQ에 유효 메시지 없음"
+      method: "DLQ 메시지 수동 검사"
+      expected: "DLQ 메시지가 모두 처리 불가능한 포이즌 필"
+    - name: "메시지 삭제율 정상"
+      method: "CloudWatch Metrics"
+      expected: "NumberOfMessagesDeleted 지속 > 0"
+    - name: "재시도 감소"
+      method: "CloudWatch Logs"
+      expected: "동일 messageId 반복 처리 감소"
+  stability_window: 600
+  success_criteria: "큐 대기 메시지 감소, DLQ에 유효 메시지 없음, 재시도 감소"
+
+escalation:
+  auto_remediate: false
+  approval_required: true
+  escalation_timeout: 600
+  notify: ["oncall"]

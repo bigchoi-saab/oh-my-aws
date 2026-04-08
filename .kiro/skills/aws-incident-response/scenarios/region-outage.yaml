@@ -1,0 +1,524 @@
+schema: "decision-knowledge-record/v1"
+
+metadata:
+  id: "region-outage"
+  name: "AWS Region-Level Outage"
+  description: >
+    Multiple AWS services in a single region fail simultaneously, correlated with an
+    AWS Health Dashboard event. Covers rapid diagnosis to distinguish region failure
+    from account/application issues, active failover to a standby region via Route 53
+    and ARC Routing Controls, write strategy decisions, and gradual failback with data
+    consistency verification.
+  category: "platform"
+  service: "multi"
+  severity: "critical"
+  tags:
+    - region-outage
+    - multi-region
+    - failover
+    - route53
+    - arc
+    - disaster-recovery
+    - resilience
+  source_refs:
+    - title: "AWS Well-Architected – Disaster Recovery"
+      url: "https://docs.aws.amazon.com/wellarchitected/latest/reliability-pillar/disaster-recovery-dr-objectives.html"
+      type: "well_architected"
+    - title: "Route 53 – Configuring DNS Failover"
+      url: "https://docs.aws.amazon.com/Route53/latest/DeveloperGuide/dns-failover.html"
+      type: "official_doc"
+    - title: "AWS ARC – Routing Controls"
+      url: "https://docs.aws.amazon.com/r53recovery/latest/dg/routing-control.html"
+      type: "official_doc"
+    - title: "AWS Health Dashboard API"
+      url: "https://docs.aws.amazon.com/health/latest/ug/getting-started-api.html"
+      type: "official_doc"
+    - title: "AWS re:Post – Region Outage Failover Patterns"
+      url: "https://repost.aws/knowledge-center/route-53-dns-health-checks"
+      type: "repost_kc"
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+triggers:
+  type: "health_dashboard"
+  description: "Multiple services down simultaneously plus AWS Health Dashboard event for target region"
+  condition: >
+    AWS Health Dashboard shows SERVICE_ISSUE for target region AND
+    internal monitoring shows simultaneous failure across 2+ independent services
+    (e.g., ELB + RDS + Lambda) AND
+    failures are isolated to a single AWS region
+  first_signal: "여러 서비스 동시 장애 + AWS Health Dashboard 이벤트"
+
+# ---------------------------------------------------------------------------
+# SYMPTOMS
+# ---------------------------------------------------------------------------
+symptoms:
+  - id: "SYM-01"
+    description: "AWS Health Dashboard shows SERVICE_ISSUE event for the affected region"
+    detection_method: "AWS Health Dashboard console or Health API"
+    cli: >
+      aws health describe-events
+      --filter '{"regions":["<AFFECTED_REGION>"],"eventStatusCodes":["open","upcoming"]}'
+      --query 'events[*].{Service:service,Status:statusCode,StartTime:startTime,Description:eventDescription}'
+
+  - id: "SYM-02"
+    description: "Multiple CloudWatch alarms firing simultaneously across different service namespaces"
+    detection_method: "CloudWatch Alarms – cross-service correlation"
+    metric: "Multiple namespaces (AWS/ELB, AWS/Lambda, AWS/RDS) in ALARM state concurrently"
+
+  - id: "SYM-03"
+    description: "Route 53 health checks failing for primary region endpoints"
+    detection_method: "Route 53 Health Checks console"
+    cli: >
+      aws route53 list-health-checks
+      --query 'HealthChecks[*].{Id:Id,Status:HealthCheckConfig.FullyQualifiedDomainName}'
+
+      aws route53 get-health-check-status
+      --health-check-id <HEALTH_CHECK_ID>
+
+  - id: "SYM-04"
+    description: "Internal metrics show request failure rate approaching 100% for primary region"
+    detection_method: "Application monitoring (CloudWatch, Datadog, etc.)"
+
+  - id: "SYM-05"
+    description: "AWS Control Plane APIs (ec2 describe-*, rds describe-*) returning errors in affected region"
+    detection_method: "CLI probing of AWS APIs in target region"
+    cli: >
+      aws ec2 describe-instances --region <AFFECTED_REGION> 2>&1 | head -5
+      aws rds describe-db-instances --region <AFFECTED_REGION> 2>&1 | head -5
+
+# ---------------------------------------------------------------------------
+# DIAGNOSIS – DECISION TREE
+# ---------------------------------------------------------------------------
+diagnosis:
+  decision_tree:
+    - step: 1
+      question: "Is the AWS Health Dashboard showing a SERVICE_ISSUE for the affected region?"
+      check:
+        cli: >
+          aws health describe-events
+          --filter '{"regions":["<AFFECTED_REGION>"],"eventStatusCodes":["open"]}'
+          --query 'events[*].{Service:service,Status:statusCode,StartTime:startTime}'
+      branches:
+        - condition: "Health Dashboard shows open SERVICE_ISSUE for the region"
+          result: "PROVIDER_CONFIRMED_OUTAGE – proceed to failover decision"
+          next_step: 2
+        - condition: "No Health Dashboard event – may be account/application issue"
+          result: "INTERNAL_INVESTIGATION – check Security Groups, IAM, quotas before failover"
+          next_step: 0
+
+    - step: 2
+      question: "Correlate: does internal symptom onset timestamp match the AWS Health event startTime?"
+      check:
+        description: >
+          Compare the first alarm timestamp from CloudWatch with the startTime in the
+          Health Dashboard event. A match within 5 minutes confirms region causation.
+        cli: >
+          aws cloudwatch describe-alarm-history
+          --alarm-name <PRIMARY_ALARM_NAME>
+          --history-item-type StateUpdate
+          --start-date <INCIDENT_START_TIME>
+          --query 'AlarmHistoryItems[0].Timestamp'
+      branches:
+        - condition: "Internal failure onset within 5 min of Health event startTime"
+          result: "REGION_OUTAGE_CONFIRMED – initiate active failover"
+          next_step: 3
+        - condition: "Internal failure predates Health event by more than 5 minutes"
+          result: "POSSIBLE_INDEPENDENT_FAILURE – investigate application before failover"
+          next_step: 0
+
+    - step: 3
+      question: "Which services and AZs are affected? Is this a partial AZ failure or full region?"
+      check:
+        cli: >
+          aws health describe-events
+          --filter '{"regions":["<AFFECTED_REGION>"],"eventStatusCodes":["open"]}'
+          --query 'events[*].{Service:service,AffectedEntities:eventScopeCode}'
+
+          aws ec2 describe-availability-zones
+          --region <AFFECTED_REGION>
+          --query 'AvailabilityZones[*].{Name:ZoneName,State:State}'
+      branches:
+        - condition: "All AZs in region affected OR multiple core services (EC2, RDS, Lambda) down"
+          result: "FULL_REGION_OUTAGE – execute region failover"
+          next_step: 0
+        - condition: "Single AZ affected"
+          result: "AZ_OUTAGE – use az-failure scenario instead"
+          next_step: 0
+
+# ---------------------------------------------------------------------------
+# ROOT CAUSES
+# ---------------------------------------------------------------------------
+root_causes:
+  - code: "REGION-POWER"
+    name: "Regional power or cooling infrastructure failure"
+    description: >
+      A physical infrastructure event (power failure, cooling outage, flooding) affects
+      AWS data centers across the region, impacting all or most AZs simultaneously.
+    probability: "low"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-02"
+
+  - code: "REGION-NETWORK"
+    name: "Regional network backbone or peering failure"
+    description: >
+      A network-level failure disrupts connectivity to the region, making all services
+      unreachable even if compute resources are operational internally.
+    probability: "medium"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-02"
+      - "SYM-03"
+
+  - code: "REGION-CONTROL-PLANE"
+    name: "AWS regional control plane service failure"
+    description: >
+      AWS control plane services (EC2 metadata, IAM, CloudFormation) fail, preventing
+      new resource provisioning while existing running resources may continue operating.
+    probability: "medium"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-05"
+
+# ---------------------------------------------------------------------------
+# REMEDIATION
+# ---------------------------------------------------------------------------
+remediation:
+  - root_cause_code: "REGION-POWER"
+    actions:
+      - order: 1
+        name: "Do not wait passively for provider recovery – initiate active failover"
+        description: >
+          KEY PRINCIPLE: Do not wait passively for AWS to recover the affected region.
+          If standby region infrastructure is ready (warm or active), initiate failover now.
+          Every minute of waiting is downtime. Begin failover decision process immediately.
+        type: "decision"
+        command: "N/A – management decision required"
+        risk: "HIGH"
+        requires_approval: true
+        estimated_impact: >
+          Failover will direct all traffic to standby region. If standby capacity is
+          insufficient, this may create a new performance bottleneck. Verify standby
+          region has sufficient capacity before switching traffic.
+
+      - order: 2
+        name: "Verify standby region capacity before failover"
+        description: >
+          Confirm the standby region has sufficient service limits and running capacity
+          to absorb primary region traffic. Check EC2 limits, RDS instance status,
+          Lambda concurrency limits, and ALB capacity in the standby region.
+        type: "aws_cli"
+        command: >
+          # Check EC2 capacity in standby region
+          aws service-quotas list-service-quotas
+          --service-code ec2
+          --region <STANDBY_REGION>
+          --query 'Quotas[?QuotaName==`Running On-Demand Standard (A, C, D, H, I, M, R, T, Z) instances`].Value'
+
+          # Check RDS status in standby region
+          aws rds describe-db-instances
+          --region <STANDBY_REGION>
+          --query 'DBInstances[*].{Id:DBInstanceIdentifier,Status:DBInstanceStatus,Class:DBInstanceClass}'
+        rollback_command: "N/A – read-only capacity check"
+        risk: "LOW"
+        requires_approval: false
+        estimated_impact: "Read-only capacity verification. No service impact."
+
+      - order: 3
+        name: "Route 53 failover to standby region"
+        description: >
+          If Route 53 health checks are configured with failover routing policy,
+          the DNS failover may be automatic once health checks fail. Verify current
+          state and force failover if not already triggered. TTL determines propagation time.
+        type: "aws_cli"
+        command: >
+          # Check current health check status
+          aws route53 get-health-check-status
+          --health-check-id <PRIMARY_HEALTH_CHECK_ID>
+
+          # If using Traffic Policy, update to point to standby
+          aws route53 change-resource-record-sets
+          --hosted-zone-id <HOSTED_ZONE_ID>
+          --change-batch '{
+            "Changes": [{
+              "Action": "UPSERT",
+              "ResourceRecordSet": {
+                "Name": "<DOMAIN_NAME>",
+                "Type": "A",
+                "TTL": 60,
+                "AliasTarget": {
+                  "HostedZoneId": "<STANDBY_ALB_ZONE_ID>",
+                  "DNSName": "<STANDBY_ALB_DNS_NAME>",
+                  "EvaluateTargetHealth": true
+                }
+              }
+            }]
+          }'
+        rollback_command: >
+          aws route53 change-resource-record-sets
+          --hosted-zone-id <HOSTED_ZONE_ID>
+          --change-batch '{
+            "Changes": [{
+              "Action": "UPSERT",
+              "ResourceRecordSet": {
+                "Name": "<DOMAIN_NAME>",
+                "Type": "A",
+                "AliasTarget": {
+                  "HostedZoneId": "<PRIMARY_ALB_ZONE_ID>",
+                  "DNSName": "<PRIMARY_ALB_DNS_NAME>",
+                  "EvaluateTargetHealth": true
+                }
+              }
+            }]
+          }'
+        risk: "HIGH"
+        requires_approval: true
+        estimated_impact: >
+          DNS TTL determines propagation time (60-300 seconds typical).
+          All new connections will be directed to standby region after propagation.
+          Existing long-lived connections to primary region will fail if region is down.
+
+      - order: 4
+        name: "ARC Routing Controls – activate region-level routing control for standby"
+        description: >
+          If AWS Application Recovery Controller (ARC) is configured, use routing controls
+          to flip traffic at the infrastructure level, bypassing DNS propagation delays.
+          ARC operates from a separate control plane independent of the failing region.
+        type: "aws_cli"
+        command: >
+          # List routing control states
+          aws route53-recovery-control-config list-routing-controls
+          --control-panel-arn <CONTROL_PANEL_ARN>
+          --region us-west-2
+
+          # Enable standby routing control, disable primary
+          aws route53-recovery-cluster update-routing-control-states
+          --update-routing-control-state-entries '[
+            {"RoutingControlArn":"<PRIMARY_ROUTING_CONTROL_ARN>","RoutingControlState":"Off"},
+            {"RoutingControlArn":"<STANDBY_ROUTING_CONTROL_ARN>","RoutingControlState":"On"}
+          ]'
+          --region us-west-2
+        rollback_command: >
+          aws route53-recovery-cluster update-routing-control-states
+          --update-routing-control-state-entries '[
+            {"RoutingControlArn":"<PRIMARY_ROUTING_CONTROL_ARN>","RoutingControlState":"On"},
+            {"RoutingControlArn":"<STANDBY_ROUTING_CONTROL_ARN>","RoutingControlState":"Off"}
+          ]'
+          --region us-west-2
+        risk: "HIGH"
+        requires_approval: true
+        estimated_impact: >
+          Immediate traffic shift at DNS level via Route 53 health check integration.
+          Faster than direct DNS record updates. Requires ARC to be pre-configured.
+
+      - order: 5
+        name: "Disable non-critical features to preserve standby region capacity"
+        description: >
+          Activate pre-defined feature flags or circuit breakers to disable non-essential
+          functionality and preserve compute/database capacity for critical user paths.
+        type: "decision"
+        command: >
+          # Example: disable background jobs, analytics, non-essential APIs
+          # Implementation varies by application stack (LaunchDarkly, AppConfig, etc.)
+          aws appconfig start-deployment
+          --application-id <APP_ID>
+          --environment-id <STANDBY_ENV_ID>
+          --deployment-strategy-id <STRATEGY_ID>
+          --configuration-profile-id <REDUCED_CAPACITY_CONFIG_ID>
+          --configuration-version <VERSION>
+        rollback_command: >
+          aws appconfig start-deployment
+          --application-id <APP_ID>
+          --environment-id <STANDBY_ENV_ID>
+          --deployment-strategy-id <STRATEGY_ID>
+          --configuration-profile-id <FULL_CAPACITY_CONFIG_ID>
+          --configuration-version <VERSION>
+        risk: "medium"
+        requires_approval: true
+        estimated_impact: "Non-critical features unavailable. Core user journeys preserved."
+
+      - order: 6
+        name: "Write strategy decision – single writer vs multi-writer"
+        description: >
+          For databases, decide the write strategy for the failover period:
+          SINGLE WRITER: Route all writes to standby region database (replica promoted to primary).
+          Simpler consistency model. Risk: data loss for writes in-flight at time of failure.
+          MULTI-WRITER: If using DynamoDB Global Tables or Aurora Global Database,
+          writes can continue in standby with eventual consistency.
+          Document this decision for the incident record.
+        type: "aws_cli"
+        command: >
+          # Promote RDS read replica in standby region to standalone primary
+          aws rds promote-read-replica
+          --db-instance-identifier <STANDBY_REPLICA_ID>
+          --region <STANDBY_REGION>
+
+          # OR for Aurora Global Database – remove from global cluster and promote
+          aws rds remove-from-global-cluster
+          --global-cluster-identifier <GLOBAL_CLUSTER_ID>
+          --db-cluster-identifier <STANDBY_CLUSTER_ARN>
+          --region <STANDBY_REGION>
+        rollback_command: >
+          # After primary region recovery, re-establish replication
+          # Note: this requires data reconciliation – do not rush failback
+          echo "Failback requires careful data consistency verification before re-establishing replication"
+        risk: "HIGH"
+        requires_approval: true
+        estimated_impact: >
+          RDS promotion takes 5-10 minutes. Aurora global detachment takes 1-5 minutes.
+          Risk of replication lag-based data loss (RPO = replication lag at time of failure).
+
+  - root_cause_code: "REGION-NETWORK"
+    actions:
+      - order: 1
+        name: "Verify region reachability from multiple geographic vantage points"
+        description: >
+          Before initiating failover, confirm the region is unreachable (not just
+          from your network). Use CloudWatch Internet Monitor or external probing.
+        type: "aws_cli"
+        command: >
+          aws internetmonitor list-monitors
+          --query 'Monitors[*].{Name:MonitorName,Status:Status}'
+
+          aws internetmonitor get-health-event
+          --monitor-name <MONITOR_NAME>
+          --event-id <EVENT_ID>
+        rollback_command: "N/A – read-only check"
+        risk: "LOW"
+        requires_approval: false
+        estimated_impact: "Read-only network reachability check."
+
+# ---------------------------------------------------------------------------
+# POST-RECOVERY – FAILBACK PROCEDURE
+# ---------------------------------------------------------------------------
+post_recovery:
+  description: >
+    When AWS confirms the primary region has recovered, do NOT immediately fail back.
+    Follow a gradual traffic migration to verify stability and data consistency.
+  steps:
+    - order: 1
+      name: "Verify primary region services are fully operational"
+      cli: >
+        aws health describe-events
+        --filter '{"regions":["<PRIMARY_REGION>"],"eventStatusCodes":["closed"]}'
+
+        aws ec2 describe-instances --region <PRIMARY_REGION> --query 'Reservations[*].Instances[*].State.Name'
+
+    - order: 2
+      name: "Data consistency verification before failback"
+      description: >
+        Before routing any writes back to primary, verify that data written to standby
+        region during failover has been or will be replicated back to primary.
+        This is the most critical step of failback.
+
+    - order: 3
+      name: "Gradual traffic failback – 10% then 25% then 50% then 100%"
+      description: >
+        Use Route 53 weighted routing or ARC to gradually shift traffic back.
+        Monitor error rates and latency at each step before proceeding.
+      traffic_stages:
+        - percentage: 10
+          wait_minutes: 15
+          validation: "Error rate < 1%, p99 latency within 20% of baseline"
+        - percentage: 25
+          wait_minutes: 15
+          validation: "Error rate < 0.5%, p99 latency within 10% of baseline"
+        - percentage: 50
+          wait_minutes: 30
+          validation: "Error rate < 0.1%, p99 latency at baseline"
+        - percentage: 100
+          wait_minutes: 60
+          validation: "Full stability confirmed, standby region traffic drained"
+
+# ---------------------------------------------------------------------------
+# GUARDRAILS
+# ---------------------------------------------------------------------------
+guardrails:
+  pre_conditions:
+    - description: "Verify standby region has sufficient capacity before failover"
+      check: >
+        Confirm standby region EC2/ECS/Lambda capacity and database read replica
+        status before executing DNS or ARC routing changes. A failover to an
+        under-provisioned standby creates a secondary outage.
+      block: true
+
+    - description: "Confirm AWS Health Dashboard event before treating as region outage"
+      check: >
+        Internal monitoring alerts alone are insufficient to declare a region outage.
+        Require a confirmed AWS Health Dashboard SERVICE_ISSUE event for the region
+        before initiating region-level failover. Without this, investigate application
+        and account-level causes first.
+      block: true
+
+    - description: "ARC routing control changes must be executed from a region separate from the failing region"
+      check: >
+        AWS ARC control plane clusters are distributed. Verify you are connecting to
+        an ARC cluster endpoint NOT in the failing region. Use us-west-2 or eu-west-1
+        cluster endpoints as fallback.
+      block: true
+
+  post_conditions:
+    - description: "Standby region health checks passing before removing Route 53 primary failover"
+      check: >
+        Confirm Route 53 health checks for standby region endpoints are HEALTHY
+        before marking the incident resolved.
+      auto_rollback: false
+
+    - description: "Data replication lag must be verified before failback"
+      check: >
+        For RDS: check ReplicaLag CloudWatch metric before promoting or reconnecting.
+        For DynamoDB Global Tables: verify ReplicationLatency metric.
+        Do not initiate failback if replication lag > 60 seconds.
+      auto_rollback: false
+
+# ---------------------------------------------------------------------------
+# VERIFICATION
+# ---------------------------------------------------------------------------
+verification:
+  checks:
+    - name: "Standby region accepting traffic successfully"
+      method: "Application monitoring – error rate and latency"
+      expected: "Error rate < 1%, p99 latency within 20% of baseline in standby region"
+
+    - name: "Route 53 health checks showing HEALTHY for standby endpoints"
+      method: "Route 53 health check status"
+      expected: "All standby region health checks in HEALTHY state"
+      cli: >
+        aws route53 get-health-check-status
+        --health-check-id <STANDBY_HEALTH_CHECK_ID>
+        --query 'HealthCheckObservations[*].StatusReport.Status'
+
+    - name: "Database writes succeeding in standby region"
+      method: "Application metrics – database write success rate"
+      expected: "Zero database write errors for 5 consecutive minutes in standby region"
+
+    - name: "AWS Health Dashboard event closed for primary region"
+      method: "AWS Health API"
+      expected: "Primary region Health event status = closed"
+      cli: >
+        aws health describe-events
+        --filter '{"regions":["<PRIMARY_REGION>"],"eventStatusCodes":["open"]}'
+        --query 'events | length(@)'
+
+  stability_window: 300
+  success_criteria: >
+    All of the following for 5 consecutive minutes in standby region:
+    (1) Error rate < 1%,
+    (2) All health checks HEALTHY,
+    (3) Database writes succeeding,
+    (4) No new AWS Health events for the failover path.
+
+# ---------------------------------------------------------------------------
+# ESCALATION
+# ---------------------------------------------------------------------------
+escalation:
+  auto_remediate: false
+  approval_required: true
+  escalation_timeout: 300
+  notify:
+    - oncall
+    - platform-team
+    - engineering-leadership
+    - aws-account-team

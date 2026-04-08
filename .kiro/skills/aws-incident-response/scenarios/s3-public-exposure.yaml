@@ -1,0 +1,454 @@
+schema: "decision-knowledge-record/v1"
+
+metadata:
+  id: "s3-public-exposure"
+  name: "S3 Bucket Public Exposure"
+  description: >
+    An S3 bucket is inadvertently exposed to the public internet via permissive
+    Block Public Access settings, bucket ACLs, or bucket policies. Covers detection
+    via AWS Config, GuardDuty, and Macie alerts, immediate blocking of public access,
+    bucket policy review and remediation, and verification that no legitimate public
+    access is broken in the process.
+  category: "security"
+  service: "s3"
+  severity: "high"
+  tags:
+    - s3
+    - public-access
+    - block-public-access
+    - bucket-policy
+    - acl
+    - guardduty
+    - macie
+    - aws-config
+    - data-exposure
+    - security
+  source_refs:
+    - title: "AWS S3 - Blocking Public Access"
+      url: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/access-control-block-public-access.html"
+      type: "official_doc"
+    - title: "AWS Config - s3-bucket-public-read-prohibited"
+      url: "https://docs.aws.amazon.com/config/latest/developerguide/s3-bucket-public-read-prohibited.html"
+      type: "official_doc"
+    - title: "GuardDuty S3 Finding Types"
+      url: "https://docs.aws.amazon.com/guardduty/latest/ug/guardduty_finding-types-s3.html"
+      type: "official_doc"
+    - title: "Amazon Macie - Finding Types"
+      url: "https://docs.aws.amazon.com/macie/latest/user/findings-types.html"
+      type: "official_doc"
+    - title: "AWS Playbook - S3 Public Exposure"
+      url: "https://github.com/aws-samples/aws-customer-playbook-framework/blob/main/docs/S3_Public_Access.md"
+      type: "playbook"
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+triggers:
+  type: "event_bridge"
+  description: "AWS Config rule violation, GuardDuty S3 finding, or Macie sensitive data alert"
+  condition: >
+    AWS Config rule s3-bucket-public-read-prohibited or s3-bucket-public-write-prohibited
+    reports NON_COMPLIANT status OR
+    GuardDuty finding type contains S3 with severity >= MEDIUM OR
+    Macie finding of type Policy:IAMUser/S3BucketPublic or SensitiveData:S3Object/*
+  guardduty_finding_types:
+    - "Policy:S3/BucketPublicAccessGranted"
+    - "Policy:S3/BucketAnonymousAccessGranted"
+    - "Discovery:S3/MaliciousIPCaller"
+    - "Exfiltration:S3/MaliciousIPCaller"
+    - "Impact:S3/PermissionsModification.Unusual"
+  aws_config_rules:
+    - "s3-bucket-public-read-prohibited"
+    - "s3-bucket-public-write-prohibited"
+    - "s3-account-level-public-access-blocks-periodic"
+
+# ---------------------------------------------------------------------------
+# SYMPTOMS
+# ---------------------------------------------------------------------------
+symptoms:
+  - id: "SYM-01"
+    description: "AWS Config rule s3-bucket-public-read-prohibited or s3-bucket-public-write-prohibited is NON_COMPLIANT"
+    detection_method: "AWS Config compliance dashboard or EventBridge rule on Config NON_COMPLIANT"
+    cli: >
+      aws configservice get-compliance-details-by-config-rule
+      --config-rule-name s3-bucket-public-read-prohibited
+      --compliance-types NON_COMPLIANT
+      --query 'EvaluationResults[*].{Resource:EvaluationResultIdentifier.EvaluationResultQualifier.ResourceId,Time:ResultRecordedTime}'
+
+  - id: "SYM-02"
+    description: "GuardDuty finding indicates S3 bucket has public access granted or data accessed from malicious IPs"
+    detection_method: "GuardDuty findings console or EventBridge alert"
+    metric: "GuardDuty | Findings | type contains S3 | severity >= MEDIUM"
+
+  - id: "SYM-03"
+    description: "Macie alert indicates bucket is publicly accessible or sensitive data found in a public bucket"
+    detection_method: "Macie findings console or EventBridge alert"
+    metric: "Macie | Findings | type: Policy:IAMUser/S3BucketPublic"
+
+  - id: "SYM-04"
+    description: "S3 server access logs show anonymous (unauthenticated) GetObject requests with HTTP 200"
+    detection_method: "S3 server access log analysis or Athena query"
+    log_query: |
+      SELECT request_datetime, remote_ip, operation, key, http_status, bytes_sent
+      FROM s3_access_logs
+      WHERE requester = '-'
+        AND operation = 'REST.GET.OBJECT'
+        AND http_status = 200
+      ORDER BY request_datetime DESC
+      LIMIT 100
+
+# ---------------------------------------------------------------------------
+# DIAGNOSIS - DECISION TREE
+# ---------------------------------------------------------------------------
+diagnosis:
+  decision_tree:
+    - step: 1
+      question: "What is the current public access configuration of the affected bucket?"
+      check:
+        cli: >
+          aws s3api get-public-access-block
+          --bucket <BUCKET>
+
+          aws s3api get-bucket-acl
+          --bucket <BUCKET>
+
+          aws s3api get-bucket-policy
+          --bucket <BUCKET>
+          --query 'Policy'
+      branches:
+        - condition: "BlockPublicAcls=false or IgnorePublicAcls=false or BlockPublicPolicy=false or RestrictPublicBuckets=false"
+          result: "Block Public Access settings are permissive - immediate remediation required"
+          next_step: 2
+        - condition: "Bucket ACL grants to AllUsers or AuthenticatedUsers"
+          result: "Public ACL grant found - remove public ACL grant and enable BPA"
+          next_step: 2
+        - condition: "Bucket policy contains Principal=* without restrictive condition"
+          result: "Bucket policy allows public access - review and restrict policy"
+          next_step: 2
+
+    - step: 2
+      question: "Is this bucket intentionally public? Check for static website hosting or CDN origin use."
+      check:
+        cli: >
+          aws s3api get-bucket-website
+          --bucket <BUCKET>
+
+          aws s3api get-bucket-tagging
+          --bucket <BUCKET>
+          --query 'TagSet[?Key==`public` || Key==`website` || Key==`cdn-origin`]'
+      branches:
+        - condition: "Bucket configured as static website AND tagged as intentionally public"
+          result: "INTENTIONAL_PUBLIC_BUCKET - document exception, enforce minimum permissions, add Macie monitoring"
+          next_step: 0
+        - condition: "No website hosting, no CDN tags, no documented exception"
+          result: "UNINTENTIONAL_EXPOSURE - proceed with immediate Block Public Access remediation"
+          next_step: 3
+
+    - step: 3
+      question: "Has any sensitive data been accessed or exfiltrated from the public bucket?"
+      check:
+        cli: >
+          aws s3api get-bucket-logging
+          --bucket <BUCKET>
+
+          aws macie2 list-findings
+          --finding-criteria '{"criterion":{"resourcesAffected.s3Bucket.name":{"eq":["<BUCKET>"]}}}'
+          --query 'findingIds'
+      branches:
+        - condition: "Macie findings show sensitive data (PII, credentials) in the bucket"
+          result: "DATA_BREACH_RISK - escalate to security team immediately, notify CISO, assess notification obligations"
+          next_step: 0
+        - condition: "S3 access logs show unauthenticated GetObject with HTTP 200"
+          result: "DATA_ACCESSED - document accessed objects, assess exposure scope, notify data owners"
+          next_step: 0
+        - condition: "No evidence of data access"
+          result: "MISCONFIGURATION_ONLY - remediate access controls, no breach evidence found"
+          next_step: 0
+
+# ---------------------------------------------------------------------------
+# ROOT CAUSES
+# ---------------------------------------------------------------------------
+root_causes:
+  - code: "S3-BPA-DISABLED"
+    name: "Block Public Access settings disabled at bucket or account level"
+    description: >
+      S3 Block Public Access (BPA) settings are not fully enabled at the bucket or
+      account level. BPA is the primary defense against accidental public exposure.
+      When BPA is disabled, bucket ACLs or bucket policies granting public access
+      take effect immediately. Common causes: infrastructure-as-code misconfiguration,
+      manual console override, or account-level BPA not enforced via AWS Organizations SCP.
+    probability: "high"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-02"
+
+  - code: "S3-PUBLIC-ACL"
+    name: "Bucket or object ACL grants access to AllUsers or AuthenticatedUsers"
+    description: >
+      The bucket or individual objects have ACL entries granting read or write access
+      to the AllUsers (unauthenticated) or AuthenticatedUsers (any AWS account) groups.
+      This is a legacy access control mechanism. Commonly introduced when objects are
+      uploaded with the --acl public-read flag in CLI or SDK calls.
+    probability: "medium"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-04"
+
+  - code: "S3-POLICY-PUBLIC"
+    name: "Bucket policy contains Principal=* without restrictive conditions"
+    description: >
+      The bucket policy has a statement with Effect=Allow, Principal=* and no
+      restricting conditions such as aws:SourceVpc, aws:PrincipalOrgID, or
+      aws:SourceAccount. This makes the bucket publicly accessible to any internet
+      client. Common causes include misconfigured CDN policies or copy-paste from
+      public documentation examples without adding required condition blocks.
+    probability: "medium"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-02"
+      - "SYM-04"
+
+# ---------------------------------------------------------------------------
+# REMEDIATION
+# ---------------------------------------------------------------------------
+remediation:
+  - root_cause_code: "S3-BPA-DISABLED"
+    actions:
+      - order: 1
+        name: "IMMEDIATE - Enable all Block Public Access settings on the bucket"
+        description: >
+          Enable all four Block Public Access settings simultaneously. This is the
+          fastest and most effective way to prevent public access regardless of
+          bucket ACL or bucket policy configuration.
+          WARNING: If this bucket serves a public static website, hosts CloudFront
+          origin assets via public URLs (without OAC), or is an intentionally public
+          bucket, enabling BPA will break that access immediately. Always complete
+          diagnosis Step 2 (intentional use check) before executing this action.
+        type: "aws_cli"
+        command: >
+          aws s3api put-public-access-block
+          --bucket <BUCKET>
+          --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true
+        rollback_command: >
+          aws s3api put-public-access-block
+          --bucket <BUCKET>
+          --public-access-block-configuration BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false
+        risk: "HIGH"
+        requires_approval: true
+        estimated_impact: >
+          All public access to the bucket is immediately blocked. Any application or
+          user relying on unauthenticated public access will receive HTTP 403 Forbidden.
+          CloudFront distributions using this bucket with OAC or OAI will continue to
+          work because OAC/OAI uses signed IAM requests, not public access.
+
+      - order: 2
+        name: "Review and restrict bucket policy if Principal=* is present"
+        description: >
+          If the bucket policy contains Principal=* that granted public read access,
+          update the policy to restrict access. After enabling BPA, existing Principal=*
+          policies are blocked, but correcting the policy provides defense in depth and
+          prevents future exposure if BPA is ever disabled.
+        type: "aws_cli"
+        command: >
+          aws s3api get-bucket-policy
+          --bucket <BUCKET>
+          --query 'Policy'
+          --output text > /tmp/s3-<BUCKET>-previous-policy.json
+
+          aws s3api put-bucket-policy
+          --bucket <BUCKET>
+          --policy '{
+            "Version": "2012-10-17",
+            "Statement": [{
+              "Sid": "DenyPublicAccess",
+              "Effect": "Deny",
+              "Principal": "*",
+              "Action": "s3:GetObject",
+              "Resource": "arn:aws:s3:::<BUCKET>/*",
+              "Condition": {
+                "StringNotEquals": {
+                  "aws:PrincipalOrgID": "<ORG_ID>"
+                }
+              }
+            }]
+          }'
+        rollback_command: >
+          aws s3api put-bucket-policy
+          --bucket <BUCKET>
+          --policy file:///tmp/s3-<BUCKET>-previous-policy.json
+        risk: "medium"
+        requires_approval: true
+        estimated_impact: >
+          Bucket policy change takes effect immediately. Access not matching the
+          condition will be denied. Validate with a test GetObject call before
+          applying to a production bucket.
+
+      - order: 3
+        name: "Enable S3 server access logging for forensic audit trail"
+        description: >
+          Enable S3 server access logging to record all requests to the bucket.
+          Required to determine if any data was accessed before the bucket was secured
+          and provides an audit trail for future incidents. Log bucket must be in the
+          same AWS region as the source bucket.
+        type: "aws_cli"
+        command: >
+          aws s3api put-bucket-logging
+          --bucket <BUCKET>
+          --bucket-logging-status '{
+            "LoggingEnabled": {
+              "TargetBucket": "<LOG_BUCKET>",
+              "TargetPrefix": "<BUCKET>/access-logs/"
+            }
+          }'
+        rollback_command: >
+          aws s3api put-bucket-logging
+          --bucket <BUCKET>
+          --bucket-logging-status '{}'
+        risk: "LOW"
+        requires_approval: false
+        estimated_impact: >
+          S3 access logs delivered to <LOG_BUCKET> with best-effort delivery (up to 1 hour delay).
+          No impact on bucket access patterns. Additional storage cost in <LOG_BUCKET>.
+
+  - root_cause_code: "S3-PUBLIC-ACL"
+    actions:
+      - order: 1
+        name: "Remove public ACL grants from the bucket"
+        description: >
+          Set the bucket ACL to private to remove AllUsers and AuthenticatedUsers grants.
+          After enabling BPA with IgnorePublicAcls=true, existing public ACLs are ignored
+          at the API level, but should be explicitly removed as defense in depth.
+        type: "aws_cli"
+        command: >
+          aws s3api put-bucket-acl
+          --bucket <BUCKET>
+          --acl private
+        rollback_command: >
+          aws s3api put-bucket-acl
+          --bucket <BUCKET>
+          --acl public-read
+        risk: "medium"
+        requires_approval: true
+        estimated_impact: >
+          Any direct public access relying on the ACL grant is immediately blocked.
+          Applications using pre-signed URLs or IAM role-based access are unaffected.
+
+# ---------------------------------------------------------------------------
+# GUARDRAILS
+# ---------------------------------------------------------------------------
+guardrails:
+  pre_conditions:
+    - description: "Check if bucket is intentionally public before blocking access"
+      check: >
+        Before enabling Block Public Access, verify:
+        (1) aws s3api get-bucket-website --bucket <BUCKET>
+            If website hosting is enabled, this may be an intentional static website origin.
+        (2) Check bucket tags for keys like public, website, or cdn-origin.
+        (3) Check if a CloudFront distribution uses this bucket as an origin without OAC.
+        (4) Search CMDB or AWS Config tags for documented public bucket exceptions.
+        Do NOT block access if the bucket is a documented intentional public asset bucket.
+      block: true
+
+    - description: "Save bucket policy backup before modification"
+      check: >
+        Before modifying bucket policy, save the current policy to a backup file:
+        aws s3api get-bucket-policy --bucket <BUCKET> --query 'Policy' --output text > /tmp/s3-<BUCKET>-previous-policy.json
+        This backup is required for the rollback_command.
+      block: true
+
+    - description: "Assess data exposure scope before remediation for breach notification decisions"
+      check: >
+        Before blocking public access, check S3 access logs and Macie findings to
+        determine if data was already accessed anonymously. If sensitive data (PII,
+        credentials, financial records) was accessed publicly, this may constitute a
+        data breach requiring regulatory notification obligations beyond technical remediation.
+        Involve legal and compliance teams if sensitive data exposure is confirmed.
+      block: false
+
+  post_conditions:
+    - description: "Verify all four Block Public Access settings are enabled"
+      check: >
+        aws s3api get-public-access-block --bucket <BUCKET>
+        All four settings must be true:
+        BlockPublicAcls, IgnorePublicAcls, BlockPublicPolicy, RestrictPublicBuckets.
+      auto_rollback: false
+
+    - description: "Verify legitimate IAM-based application access is not broken"
+      check: >
+        Test that applications using IAM roles or pre-signed URLs can still access the bucket.
+        Public anonymous access should fail with HTTP 403.
+        Command: aws s3 ls s3://<BUCKET>/ (should succeed with IAM credentials)
+      auto_rollback: false
+
+    - description: "Confirm AWS Config rule shows COMPLIANT status"
+      check: >
+        aws configservice get-compliance-details-by-config-rule
+        --config-rule-name s3-bucket-public-read-prohibited
+        --compliance-types COMPLIANT
+        The bucket should appear COMPLIANT within 10 minutes of remediation.
+      auto_rollback: false
+
+# ---------------------------------------------------------------------------
+# VERIFICATION
+# ---------------------------------------------------------------------------
+verification:
+  checks:
+    - name: "Block Public Access fully enabled"
+      method: "aws s3api get-public-access-block"
+      expected: "All four BPA settings are true"
+      cli: >
+        aws s3api get-public-access-block
+        --bucket <BUCKET>
+        --query 'PublicAccessBlockConfiguration'
+
+    - name: "No public ACL grants on bucket"
+      method: "aws s3api get-bucket-acl"
+      expected: "No grants to AllUsers or AuthenticatedUsers"
+      cli: >
+        aws s3api get-bucket-acl
+        --bucket <BUCKET>
+        --query 'Grants'
+
+    - name: "Unauthenticated access returns HTTP 403"
+      method: "HTTP request without credentials"
+      expected: "HTTP 403 Forbidden returned for anonymous access"
+      cli: >
+        curl -s -o /dev/null -w "%{http_code}"
+        https://<BUCKET>.s3.<REGION>.amazonaws.com/<SAMPLE_KEY>
+
+    - name: "AWS Config rule COMPLIANT"
+      method: "aws configservice get-compliance-details-by-config-rule"
+      expected: "Bucket appears COMPLIANT for s3-bucket-public-read-prohibited"
+      cli: >
+        aws configservice get-compliance-details-by-config-rule
+        --config-rule-name s3-bucket-public-read-prohibited
+        --compliance-types COMPLIANT
+
+    - name: "GuardDuty and Macie findings archived"
+      method: "GuardDuty archive-findings"
+      expected: "Related findings archived with documented resolution rationale"
+      cli: >
+        aws guardduty archive-findings
+        --detector-id <DETECTOR_ID>
+        --finding-ids <FINDING_IDS>
+
+  stability_window: 600
+  success_criteria: >
+    All of the following:
+    (1) All four Block Public Access settings confirmed true,
+    (2) Anonymous access returns HTTP 403 Forbidden,
+    (3) AWS Config rule shows COMPLIANT for the affected bucket,
+    (4) Legitimate IAM-based application access confirmed working,
+    (5) GuardDuty and Macie findings archived with documented resolution.
+
+# ---------------------------------------------------------------------------
+# ESCALATION
+# ---------------------------------------------------------------------------
+escalation:
+  auto_remediate: false
+  approval_required: true
+  escalation_timeout: 300
+  notify:
+    - security-team
+    - oncall
+    - ciso

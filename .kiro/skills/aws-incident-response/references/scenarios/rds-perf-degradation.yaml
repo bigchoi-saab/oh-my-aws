@@ -1,0 +1,207 @@
+schema: decision-knowledge-record/v1
+
+metadata:
+  id: "rds-perf-degradation"
+  name: "RDS 성능 저하"
+  description: "RDS 인스턴스의 쿼리 응답 시간 증가, CPU/메모리/I/O 병목"
+  category: "database"
+  service: "rds"
+  severity: "high"
+  tags: ["rds", "performance", "slow-query", "cpu", "io"]
+  source_refs:
+    - title: "RDS Troubleshooting"
+      url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_Troubleshooting.html"
+      type: "official_doc"
+    - title: "RDS Performance Insights"
+      url: "https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/USER_PerfInsights.html"
+      type: "official_doc"
+    - title: "RDS PostgreSQL CloudWatch Logs (re:Post)"
+      url: "https://repost.aws/knowledge-center/analyze-cloudwatch-logs-rds-postgresql"
+      type: "repost_kc"
+
+triggers:
+  - type: "metric_threshold"
+    description: "RDS CPU > 80% 또는 ReadLatency/WriteLatency 급증"
+    condition: "AWS/RDS.CPUUtilization.Average > 80 for 5 minutes OR AWS/RDS.ReadLatency.p99 > 50ms"
+    metrics:
+      - namespace: "AWS/RDS"
+        metric_name: "CPUUtilization"
+        statistic: "Average"
+        period: 300
+        threshold: 80
+
+symptoms:
+  - id: "s1"
+    description: "CPU 사용률 지속 80% 이상"
+    detection_method: "CloudWatch Metrics"
+    metric: "AWS/RDS | CPUUtilization | Average"
+  - id: "s2"
+    description: "슬로우 쿼리 다수 발생"
+    detection_method: "CloudWatch Logs Insights"
+    log_query: |
+      fields @timestamp, @message
+      | parse @message /duration: (?<duration>.*?) ms\s+statement: (?<statement>.*?)$/
+      | filter duration > 1000 | sort duration desc | limit 50
+  - id: "s3"
+    description: "커넥션 수 급증"
+    detection_method: "CloudWatch Metrics"
+    metric: "AWS/RDS | DatabaseConnections | Max"
+  - id: "s4"
+    description: "디스크 큐 깊이 증가"
+    detection_method: "CloudWatch Metrics"
+    metric: "AWS/RDS | DiskQueueDepth | Average"
+
+diagnosis:
+  decision_tree:
+    - step: 1
+      question: "CPU 병목인가? (CPU > 80%)"
+      check:
+        metric: "AWS/RDS | CPUUtilization | Average"
+      branches:
+        - condition: "CPU > 80%"
+          result: "RDS-CPU-CONFIRMED"
+          next_step: 2
+        - condition: "CPU 정상"
+          result: "NOT_CPU"
+          next_step: 3
+    - step: 2
+      question: "슬로우 쿼리가 CPU 원인인가?"
+      check:
+        log_query: "Slow Query Log에서 상위 쿼리 확인"
+      branches:
+        - condition: "특정 쿼리가 CPU 집중"
+          result: "RDS-SLOW-QUERY"
+          next_step: 0
+        - condition: "쿼리는 정상, 트래픽 자체가 많음"
+          result: "RDS-CAPACITY"
+          next_step: 0
+    - step: 3
+      question: "I/O 병목인가? (ReadLatency > 50ms 또는 DiskQueueDepth > 10)"
+      check:
+        metric: "AWS/RDS | ReadLatency, WriteLatency, DiskQueueDepth"
+      branches:
+        - condition: "Latency 높음 또는 DiskQueueDepth > 10"
+          result: "RDS-IO"
+          next_step: 0
+        - condition: "I/O 정상"
+          result: "RDS-CONN-POOL"
+          next_step: 0
+
+root_causes:
+  - code: "RDS-SLOW-QUERY"
+    name: "비효율적 쿼리 / 인덱스 부재"
+    description: "특정 쿼리의 풀 테이블 스캔 또는 인덱스 미사용"
+    probability: "high"
+    related_symptoms: ["s1", "s2"]
+  - code: "RDS-CAPACITY"
+    name: "인스턴스 용량 부족"
+    description: "현재 인스턴스 클래스로 트래픽 감당 불가"
+    probability: "medium"
+    related_symptoms: ["s1", "s3"]
+  - code: "RDS-IO"
+    name: "스토리지 I/O 병목"
+    description: "프로비저닝된 IOPS 초과 또는 gp3 기본 성능 한계"
+    probability: "medium"
+    related_symptoms: ["s4"]
+  - code: "RDS-CONN-POOL"
+    name: "커넥션 풀 고갈"
+    description: "DatabaseConnections가 max_connections에 근접"
+    probability: "medium"
+    related_symptoms: ["s3"]
+
+remediation:
+  - root_cause_code: "RDS-SLOW-QUERY"
+    actions:
+      - order: 1
+        name: "Performance Insights로 상위 쿼리 식별"
+        type: "aws_cli"
+        command: |
+          aws pi get-resource-metrics --service-type RDS \
+            --identifier db:<INSTANCE> \
+            --metric-queries '[{Metric:{MetricName:"db.load.avg"}}]' \
+            --start-time <START> --end-time <END> --period-in-seconds 300
+        risk: "low"
+        requires_approval: false
+      - order: 2
+        name: "슬로우 쿼리 EXPLAIN ANALYZE 권고"
+        type: "manual"
+        command: "읽기 전용 — 개발팀에 쿼리 최적화 요청"
+        risk: "low"
+        requires_approval: false
+
+  - root_cause_code: "RDS-CAPACITY"
+    actions:
+      - order: 1
+        name: "인스턴스 클래스 업그레이드"
+        type: "aws_cli"
+        command: |
+          aws rds modify-db-instance --db-instance-identifier <INSTANCE> \
+            --db-instance-class <NEW_CLASS> --apply-immediately
+        rollback_command: |
+          aws rds modify-db-instance --db-instance-identifier <INSTANCE> \
+            --db-instance-class <ORIGINAL_CLASS> --apply-immediately
+        risk: "high"
+        requires_approval: true
+        estimated_impact: "수분간 장애 조치 발생 (Multi-AZ 시)"
+
+  - root_cause_code: "RDS-IO"
+    actions:
+      - order: 1
+        name: "gp3 IOPS 증설 또는 io1 전환"
+        type: "aws_cli"
+        command: |
+          aws rds modify-db-instance --db-instance-identifier <INSTANCE> \
+            --allocated-storage <SIZE> --iops <NEW_IOPS> --storage-type io1 \
+            --apply-immediately
+        rollback_command: |
+          aws rds modify-db-instance --db-instance-identifier <INSTANCE> \
+            --storage-type gp3 --apply-immediately
+        risk: "medium"
+        requires_approval: true
+        estimated_impact: "스토리지 수정 중 짧은 중단 가능"
+
+  - root_cause_code: "RDS-CONN-POOL"
+    actions:
+      - order: 1
+        name: "RDS Proxy 도입 검토"
+        type: "manual"
+        command: |
+          aws rds create-db-proxy --db-proxy-name <PROXY_NAME> \
+            --engine-family POSTGRESQL --auth <AUTH_CONFIG> \
+            --role-arn <ROLE_ARN> --vpc-subnet-ids <SUBNETS>
+        risk: "medium"
+        requires_approval: true
+        estimated_impact: "연결 풀링으로 커넥션 수 감소"
+
+guardrails:
+  pre_conditions:
+    - description: "인스턴스 클래스 변경 전 스냅샷 확인"
+      check: "최근 자동 백업 존재 여부"
+      block: true
+    - description: "비용 영향 표시"
+      check: "새 인스턴스 클래스의 시간당 요금 표시"
+      block: true
+  post_conditions:
+    - description: "CPU < 80% 확인"
+      check: "AWS/RDS.CPUUtilization.Average < 80 for 5 minutes"
+      auto_rollback: true
+
+verification:
+  checks:
+    - name: "CPU 정상화"
+      method: "CloudWatch Metrics"
+      expected: "CPUUtilization < 70%"
+    - name: "쿼리 응답 시간 개선"
+      method: "CloudWatch Logs"
+      expected: "슬로우 쿼리 감소 추세"
+    - name: "커넥션 안정"
+      method: "CloudWatch Metrics"
+      expected: "DatabaseConnections 안정"
+  stability_window: 300
+  success_criteria: "CPU < 70%, 슬로우 쿼리 감소, 커넥션 안정"
+
+escalation:
+  auto_remediate: false
+  approval_required: true
+  escalation_timeout: 600
+  notify: ["oncall", "dba"]

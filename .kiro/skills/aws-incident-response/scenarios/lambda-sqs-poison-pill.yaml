@@ -1,0 +1,471 @@
+schema: "decision-knowledge-record/v1"
+
+metadata:
+  id: "lambda-sqs-poison-pill-retry-storm"
+  name: "Lambda SQS Poison Pill and Retry Storm"
+  description: >
+    SQS queue depth grows unbounded as Lambda repeatedly processes and fails on one or more
+    poison-pill messages. Without partial batch failure reporting or a dead-letter queue,
+    every batch containing a bad message fails entirely and is requeued, causing a retry
+    storm that starves healthy messages. Covers four root causes: missing partial batch
+    failure response, absent DLQ, Visibility Timeout shorter than Lambda execution time,
+    and non-idempotent handler code.
+  category: "compute"
+  service: "lambda"
+  severity: "high"
+  tags:
+    - lambda
+    - sqs
+    - poison-pill
+    - retry-storm
+    - dlq
+    - partial-batch-failure
+    - idempotency
+    - event-source-mapping
+  source_refs:
+    - title: "Lambda – Using Lambda with Amazon SQS"
+      url: "https://docs.aws.amazon.com/lambda/latest/dg/with-sqs.html"
+      type: "official_doc"
+    - title: "Lambda – Reporting Batch Item Failures"
+      url: "https://docs.aws.amazon.com/lambda/latest/dg/with-sqs.html#services-sqs-batchfailurereporting"
+      type: "official_doc"
+    - title: "SQS – Dead-Letter Queues"
+      url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-dead-letter-queues.html"
+      type: "official_doc"
+    - title: "SQS – Visibility Timeout"
+      url: "https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-visibility-timeout.html"
+      type: "official_doc"
+    - title: "Troubleshoot Lambda with SQS – Poison Pill (re:Post)"
+      url: "https://repost.aws/knowledge-center/lambda-sqs-poison-pill"
+      type: "repost_kc"
+    - title: "Well-Architected Serverless Lens – Reliability"
+      url: "https://docs.aws.amazon.com/wellarchitected/latest/serverless-applications-lens/reliability.html"
+      type: "well_architected"
+
+# ---------------------------------------------------------------------------
+# TRIGGERS
+# ---------------------------------------------------------------------------
+triggers:
+  type: "metric_threshold"
+  description: "SQS queue depth and oldest message age both trending upward simultaneously"
+  condition: >
+    AWS/SQS ApproximateNumberOfMessagesVisible increasing AND
+    AWS/SQS ApproximateAgeOfOldestMessage increasing
+  cloudwatch_alarm_example: |
+    MetricName: ApproximateNumberOfMessagesVisible
+    Namespace: AWS/SQS
+    Statistic: Maximum
+    Period: 300
+    EvaluationPeriods: 3
+    Threshold: <EXPECTED_MAX_DEPTH>
+    ComparisonOperator: GreaterThanThreshold
+
+# ---------------------------------------------------------------------------
+# SYMPTOMS
+# ---------------------------------------------------------------------------
+symptoms:
+  - id: "SYM-01"
+    description: "ApproximateNumberOfMessagesVisible increasing despite Lambda consumer running"
+    detection_method: "CloudWatch Metrics – AWS/SQS"
+    metric: "AWS/SQS | ApproximateNumberOfMessagesVisible | Maximum – trending up"
+
+  - id: "SYM-02"
+    description: "ApproximateAgeOfOldestMessage increasing – messages not being drained"
+    detection_method: "CloudWatch Metrics – AWS/SQS"
+    metric: "AWS/SQS | ApproximateAgeOfOldestMessage | Maximum – trending up"
+
+  - id: "SYM-03"
+    description: "Lambda Errors metric elevated – function failing on each batch attempt"
+    detection_method: "CloudWatch Metrics – AWS/Lambda"
+    metric: "AWS/Lambda | Errors | Sum – elevated compared to baseline"
+
+  - id: "SYM-04"
+    description: "NumberOfMessagesSent to DLQ is zero despite failures (DLQ not configured)"
+    detection_method: "CloudWatch Metrics – AWS/SQS on source queue"
+    metric: "AWS/SQS | NumberOfMessagesSent (DLQ) | Sum = 0"
+
+  - id: "SYM-05"
+    description: "NumberOfMessagesReceived >> NumberOfMessagesDeleted – same messages received repeatedly"
+    detection_method: "CloudWatch Metrics – AWS/SQS"
+    metric: "AWS/SQS | NumberOfMessagesReceived / NumberOfMessagesDeleted ratio >> 1"
+
+  - id: "SYM-06"
+    description: "Lambda IteratorAge rising – event source mapping falling behind"
+    detection_method: "CloudWatch Metrics – AWS/Lambda"
+    metric: "AWS/Lambda | IteratorAge | Maximum – trending up"
+
+# ---------------------------------------------------------------------------
+# DIAGNOSIS – DECISION TREE
+# ---------------------------------------------------------------------------
+diagnosis:
+  decision_tree:
+    - step: 1
+      question: "Is the DLQ configured on the SQS event source mapping?"
+      check:
+        cli: >
+          aws lambda list-event-source-mappings
+          --function-name <FUNCTION_NAME>
+          --query 'EventSourceMappings[?contains(EventSourceArn, `sqs`)].{UUID:UUID,ESM:EventSourceArn,DLQ:DestinationConfig}'
+      branches:
+        - condition: "DLQ DestinationConfig is null or absent"
+          result: "POISON-NO-DLQ – no dead-letter destination, failed messages requeue forever"
+          next_step: 2
+        - condition: "DLQ configured"
+          result: "DLQ present – check message counts in DLQ"
+          next_step: 2
+
+    - step: 2
+      question: "What is the maxReceiveCount on the source queue's RedrivePolicy?"
+      check:
+        cli: >
+          aws sqs get-queue-attributes
+          --queue-url <QUEUE_URL>
+          --attribute-names RedrivePolicy
+      branches:
+        - condition: "RedrivePolicy absent (no maxReceiveCount set)"
+          result: "POISON-NO-DLQ – queue has no redrive policy at all"
+          next_step: 3
+        - condition: "maxReceiveCount >= 1"
+          result: "Redrive policy present – check if messages are moving to DLQ"
+          next_step: 3
+
+    - step: 3
+      question: "Is the Visibility Timeout of the source queue >= 6x the Lambda function timeout?"
+      check:
+        cli_queue: >
+          aws sqs get-queue-attributes
+          --queue-url <QUEUE_URL>
+          --attribute-names VisibilityTimeout
+        cli_function: >
+          aws lambda get-function-configuration
+          --function-name <FUNCTION_NAME>
+          --query 'Timeout'
+      branches:
+        - condition: "VisibilityTimeout < Lambda_Timeout * 6"
+          result: "POISON-VISIBILITY – message becomes visible again before Lambda finishes, causing duplicate processing"
+          next_step: 4
+        - condition: "VisibilityTimeout >= Lambda_Timeout * 6"
+          result: "Visibility Timeout adequate – check partial batch failure handling"
+          next_step: 4
+
+    - step: 4
+      question: "Does the event source mapping have ReportBatchItemFailures enabled?"
+      check:
+        cli: >
+          aws lambda get-event-source-mapping
+          --uuid <ESM_UUID>
+          --query 'FunctionResponseTypes'
+      branches:
+        - condition: "FunctionResponseTypes is null or empty"
+          result: "POISON-MISSING-PARTIAL-BATCH – entire batch retried when any single message fails"
+          next_step: 5
+        - condition: "FunctionResponseTypes contains ReportBatchItemFailures"
+          result: "Partial batch reporting enabled – check handler code for idempotency"
+          next_step: 5
+
+    - step: 5
+      question: "Does the Lambda handler return itemFailures in the response body on partial failure?"
+      check:
+        description: >
+          Inspect function code or logs for batchItemFailures response structure.
+          A function with ReportBatchItemFailures must return:
+          {"batchItemFailures": [{"itemIdentifier": "<messageId>"}]}
+      branches:
+        - condition: "Handler throws exception instead of returning batchItemFailures"
+          result: "POISON-MISSING-PARTIAL-BATCH – correct ESM flag is set but handler does not use it"
+          next_step: 0
+        - condition: "Handler returns batchItemFailures but same message keeps failing"
+          result: "POISON-NO-IDEMPOTENCY – message processing is not idempotent; fix is a code change"
+          next_step: 0
+
+# ---------------------------------------------------------------------------
+# ROOT CAUSES
+# ---------------------------------------------------------------------------
+root_causes:
+  - code: "POISON-MISSING-PARTIAL-BATCH"
+    name: "ReportBatchItemFailures not enabled on event source mapping"
+    description: >
+      When a Lambda function processes an SQS batch and one message fails, without
+      ReportBatchItemFailures the entire batch is returned to the queue. Every message
+      in the batch – including healthy ones – is reprocessed until maxReceiveCount
+      is exhausted or the queue fills up. Enabling this feature lets the function
+      report only the failing messageIds so healthy messages are deleted.
+    probability: "high"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-02"
+      - "SYM-03"
+      - "SYM-05"
+
+  - code: "POISON-NO-DLQ"
+    name: "No dead-letter queue configured on source queue or event source mapping"
+    description: >
+      Without a RedrivePolicy on the SQS queue (or a DestinationConfig on the event
+      source mapping), messages that repeatedly fail have no escape path. They are
+      retried indefinitely, blocking the queue and eventually causing a retry storm
+      that consumes Lambda concurrency and prevents healthy messages from being processed.
+    probability: "high"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-02"
+      - "SYM-04"
+      - "SYM-05"
+
+  - code: "POISON-VISIBILITY"
+    name: "Visibility Timeout shorter than Lambda execution duration"
+    description: >
+      SQS Visibility Timeout controls how long a message is hidden from other consumers
+      after being received. If the timeout is shorter than the Lambda function's execution
+      time (AWS recommends 6x Lambda timeout), a message becomes visible again while
+      Lambda is still processing it, causing duplicate deliveries and compounding the
+      retry storm even for messages Lambda eventually succeeds on.
+    probability: "medium"
+    related_symptoms:
+      - "SYM-01"
+      - "SYM-02"
+      - "SYM-05"
+
+  - code: "POISON-NO-IDEMPOTENCY"
+    name: "Handler is not idempotent – repeated delivery causes downstream side-effects"
+    description: >
+      Even with correct DLQ and partial batch failure configuration, a handler that
+      performs non-idempotent operations (duplicate DB writes, double charges, duplicate
+      emails) produces incorrect results when the same message is delivered more than once.
+      SQS guarantees at-least-once delivery; all handlers must be designed for repeated
+      message receipt.
+    probability: "medium"
+    related_symptoms:
+      - "SYM-03"
+      - "SYM-05"
+
+# ---------------------------------------------------------------------------
+# REMEDIATION
+# ---------------------------------------------------------------------------
+remediation:
+  - root_cause_code: "POISON-MISSING-PARTIAL-BATCH"
+    actions:
+      - order: 1
+        name: "Enable ReportBatchItemFailures on the event source mapping"
+        description: >
+          Update the Lambda event source mapping to include ReportBatchItemFailures in
+          FunctionResponseTypes. This allows the function to return only the failing
+          messageIds so SQS retries only those messages. The function handler must also
+          be updated to return the batchItemFailures response structure instead of
+          throwing an exception for partial failures.
+        type: "aws_cli"
+        command: >
+          aws lambda update-event-source-mapping
+          --uuid <ESM_UUID>
+          --function-response-types ReportBatchItemFailures
+        rollback_command: >
+          aws lambda update-event-source-mapping
+          --uuid <ESM_UUID>
+          --function-response-types '[]'
+        risk: "low"
+        requires_approval: false
+        estimated_impact: >
+          No cost impact. Reduces unnecessary retries and Lambda invocations.
+          Handler code must return batchItemFailures response; ensure code change
+          is deployed before or alongside this ESM change.
+
+  - root_cause_code: "POISON-NO-DLQ"
+    actions:
+      - order: 1
+        name: "Create a DLQ and attach a RedrivePolicy to the source queue"
+        description: >
+          Create an SQS queue as the dead-letter destination and configure a RedrivePolicy
+          on the source queue with a reasonable maxReceiveCount (typically 3-5). Messages
+          that fail maxReceiveCount times are moved to the DLQ, stopping the retry storm.
+          Set an alarm on the DLQ to alert when messages arrive.
+        type: "aws_cli"
+        command: >
+          aws sqs create-queue
+          --queue-name <SOURCE_QUEUE_NAME>-dlq &&
+          DLQ_ARN=$(aws sqs get-queue-attributes
+          --queue-url $(aws sqs get-queue-url --queue-name <SOURCE_QUEUE_NAME>-dlq --query 'QueueUrl' --output text)
+          --attribute-names QueueArn
+          --query 'Attributes.QueueArn' --output text) &&
+          aws sqs set-queue-attributes
+          --queue-url <SOURCE_QUEUE_URL>
+          --attributes "{\"RedrivePolicy\":\"{\\\"deadLetterTargetArn\\\":\\\"${DLQ_ARN}\\\",\\\"maxReceiveCount\\\":\\\"5\\\"}\"}"
+        rollback_command: >
+          aws sqs set-queue-attributes
+          --queue-url <SOURCE_QUEUE_URL>
+          --attributes '{"RedrivePolicy":""}'
+        risk: "low"
+        requires_approval: false
+        estimated_impact: >
+          Additional SQS queue cost is negligible. Stops retry storm immediately
+          once maxReceiveCount is exhausted for existing poison messages.
+          Existing messages already at or past maxReceiveCount move to DLQ on next failure.
+
+  - root_cause_code: "POISON-VISIBILITY"
+    actions:
+      - order: 1
+        name: "Set Visibility Timeout to at least 6x the Lambda function timeout"
+        description: >
+          AWS recommends the SQS Visibility Timeout be set to 6 times the Lambda function
+          timeout to prevent messages from becoming visible again while Lambda is still
+          processing them. For example, if Lambda timeout is 30s, set Visibility Timeout
+          to 180s (6 * 30). Maximum SQS Visibility Timeout is 43200 seconds (12 hours).
+        type: "aws_cli"
+        command: >
+          aws sqs set-queue-attributes
+          --queue-url <QUEUE_URL>
+          --attributes '{"VisibilityTimeout":"<6_X_LAMBDA_TIMEOUT_SECONDS>"}'
+        rollback_command: >
+          aws sqs set-queue-attributes
+          --queue-url <QUEUE_URL>
+          --attributes '{"VisibilityTimeout":"<PREVIOUS_VISIBILITY_TIMEOUT_SECONDS>"}'
+        risk: "low"
+        requires_approval: false
+        estimated_impact: >
+          No direct cost impact. Longer visibility timeout means failed messages take
+          longer to become visible for retry, which is the desired behavior.
+          Ensure maxReceiveCount on the RedrivePolicy accounts for expected retry cadence.
+
+  - root_cause_code: "POISON-NO-IDEMPOTENCY"
+    actions:
+      - order: 1
+        name: "Implement idempotency key pattern in the Lambda handler"
+        description: >
+          SQS guarantees at-least-once delivery. Handlers must be idempotent. Common
+          patterns include: (1) use the SQS messageId or a business-level deduplication
+          key stored in DynamoDB with a TTL, (2) use conditional writes/upserts in the
+          database, (3) use the Lambda Powertools Idempotency utility which manages
+          DynamoDB-backed deduplication automatically. This is a code change that requires
+          a function redeploy.
+        type: "code_change"
+        command: >
+          echo "Code change required: implement idempotency in handler using messageId as deduplication key."
+          echo "Example: store processed messageIds in DynamoDB with TTL = message retention period."
+          echo "Lambda Powertools Idempotency: https://docs.powertools.aws.dev/lambda/python/latest/utilities/idempotency/"
+        rollback_command: >
+          echo "Revert handler code change and redeploy previous function version."
+          echo "aws lambda update-alias --function-name <FUNCTION_NAME> --name <ALIAS> --function-version <LAST_GOOD_VERSION>"
+        risk: "medium"
+        requires_approval: true
+        estimated_impact: >
+          Requires DynamoDB table for idempotency store if using Powertools or custom implementation.
+          DynamoDB cost: negligible for typical message volumes. Redeploy required.
+
+# ---------------------------------------------------------------------------
+# GUARDRAILS
+# ---------------------------------------------------------------------------
+guardrails:
+  pre_conditions:
+    - description: "DLQ must exist before attaching RedrivePolicy to source queue"
+      check: >
+        Confirm the DLQ SQS queue exists and its ARN is valid before setting
+        the RedrivePolicy attribute. An invalid deadLetterTargetArn will be silently
+        rejected and the source queue will have no DLQ protection.
+      block: true
+
+    - description: "maxReceiveCount must be set to a reasonable value (1-10)"
+      check: >
+        Verify maxReceiveCount is between 1 and 10. A value of 1 moves messages to
+        DLQ on first failure (may discard transient errors). A value > 10 delays
+        DLQ routing and prolongs the retry storm. Confirm the value with the operator.
+      block: true
+
+    - description: "Handler code must be updated to return batchItemFailures before enabling ReportBatchItemFailures"
+      check: >
+        Confirm that the Lambda function handler code has been updated to return
+        the batchItemFailures response structure. Enabling ReportBatchItemFailures
+        on the ESM without the matching code change has no effect – the function
+        must explicitly return failing messageIds.
+      block: false
+
+    - description: "Visibility Timeout change must not interfere with message retention period"
+      check: >
+        Confirm that the new Visibility Timeout is less than the queue's MessageRetentionPeriod.
+        A Visibility Timeout longer than the retention period would cause messages to expire
+        before becoming visible again.
+      block: true
+
+  post_conditions:
+    - description: "SQS queue depth (ApproximateNumberOfMessagesVisible) must stabilize or decrease"
+      check: >
+        After remediation, ApproximateNumberOfMessagesVisible should plateau or decrease
+        within 5 minutes. Continued growth indicates the fix was not applied correctly
+        or a different root cause is active.
+      auto_rollback: false
+
+    - description: "DLQ message arrival rate must be stable (not growing unboundedly)"
+      check: >
+        Monitor DLQ NumberOfMessagesSent. An initial spike as existing poison messages
+        exhaust maxReceiveCount is expected. Continued growth in DLQ after existing
+        backlog is processed indicates new poison messages are being produced upstream.
+      auto_rollback: false
+
+# ---------------------------------------------------------------------------
+# VERIFICATION
+# ---------------------------------------------------------------------------
+verification:
+  checks:
+    - name: "SQS queue depth decreasing"
+      method: "CloudWatch Metrics – AWS/SQS"
+      expected: "ApproximateNumberOfMessagesVisible decreasing or stable over 5-minute window"
+      metric:
+        namespace: "AWS/SQS"
+        metric_name: "ApproximateNumberOfMessagesVisible"
+        statistic: "Maximum"
+        threshold: "not increasing"
+
+    - name: "DLQ not filling unboundedly"
+      method: "CloudWatch Metrics – AWS/SQS (DLQ)"
+      expected: >
+        DLQ NumberOfMessagesSent shows only the initial poison-pill backlog moving in,
+        then stabilizes. Continuous DLQ growth after initial spike indicates upstream
+        is still producing bad messages.
+      metric:
+        namespace: "AWS/SQS"
+        metric_name: "NumberOfMessagesSent"
+        statistic: "Sum"
+        threshold: "initial spike then stable"
+
+    - name: "IteratorAge stable or decreasing"
+      method: "CloudWatch Metrics – AWS/Lambda"
+      expected: "IteratorAge flat or decreasing – event source mapping catching up"
+      metric:
+        namespace: "AWS/Lambda"
+        metric_name: "IteratorAge"
+        statistic: "Maximum"
+        threshold: "not increasing"
+
+    - name: "Lambda Errors rate returning to baseline"
+      method: "CloudWatch Metrics – AWS/Lambda"
+      expected: "Errors rate at or below pre-incident baseline within 10 minutes"
+      metric:
+        namespace: "AWS/Lambda"
+        metric_name: "Errors"
+        statistic: "Sum"
+        threshold: "<= pre_action_baseline"
+
+    - name: "ApproximateAgeOfOldestMessage decreasing"
+      method: "CloudWatch Metrics – AWS/SQS"
+      expected: "Oldest message age decreasing as queue drains"
+      metric:
+        namespace: "AWS/SQS"
+        metric_name: "ApproximateAgeOfOldestMessage"
+        statistic: "Maximum"
+        threshold: "decreasing trend"
+
+  stability_window: 300
+  success_criteria: >
+    All of the following for 5 consecutive minutes:
+    (1) ApproximateNumberOfMessagesVisible stable or decreasing,
+    (2) DLQ message rate stable (initial spike resolved),
+    (3) IteratorAge flat or decreasing,
+    (4) Lambda Errors at or below pre-incident baseline.
+
+# ---------------------------------------------------------------------------
+# ESCALATION
+# ---------------------------------------------------------------------------
+escalation:
+  auto_remediate: false
+  approval_required: true
+  escalation_timeout: 600
+  notify:
+    - oncall
+    - platform-team

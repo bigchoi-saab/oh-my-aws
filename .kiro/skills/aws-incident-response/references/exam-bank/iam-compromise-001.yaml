@@ -1,0 +1,80 @@
+schema: exam-question/v1
+
+question:
+  id: "exam-iam-compromise-001"
+  version: "1.0.0"
+  type: multiple_response
+
+  dkr_mapping:
+    scenario_id: "iam-compromise"
+    tested_sections: [symptoms, diagnosis, remediation, guardrails]
+    root_cause_codes: ["IAM-KEY"]
+
+  scenario:
+    context: "한 스타트업이 빌드 CI/CD용 IAM 사용자 ci-builder를 운영하며 액세스 키를 CI 서비스에 저장해두었다. GuardDuty가 활성화되어 있다."
+    situation: "GuardDuty가 'UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration.OutsideAWS' finding을 방금 생성했다. 해당 액세스 키로 ap-southeast-1 리전(회사가 사용하지 않는 리전)에서 CreateUser, CreateAccessKey API 호출이 확인되었다. 평소 사용 리전은 ap-northeast-2 뿐이다."
+    evidence:
+      - type: alarm
+        source: "GuardDuty finding"
+        value: "UnauthorizedAccess:IAMUser/InstanceCredentialExfiltration.OutsideAWS, resource.accessKeyDetails.accessKeyId: AKIA..."
+      - type: log
+        source: "CloudTrail"
+        value: "ap-southeast-1에서 CreateUser, CreateAccessKey, PutUserPolicy 이벤트 (지난 30분)"
+      - type: cli_output
+        source: "aws iam list-access-keys --user-name ci-builder"
+        value: "AccessKeyId AKIA... Status Active"
+    constraint: "침해 확산을 막는 것이 최우선이며 정상 CI 파이프라인 중단은 일시적으로 감수한다."
+
+  question_text: "즉시 수행해야 할 대응 조치 두 가지를 선택하시오."
+
+  options:
+    - key: A
+      text: "유출된 액세스 키를 즉시 Inactive 상태로 변경하여 향후 API 호출을 차단한다."
+    - key: B
+      text: "CloudTrail을 해당 키 ID 기준으로 조회하여 침해 기간 동안 수행된 모든 API 호출과 생성된 리소스를 식별한다."
+    - key: C
+      text: "IAM 사용자의 콘솔 비밀번호를 변경한다 (액세스 키와 무관한 콘솔 세션을 보호)."
+    - key: D
+      text: "GuardDuty finding을 suppress 처리하고 모니터링을 계속한다."
+    - key: E
+      text: "ap-southeast-1 리전을 SCP(Service Control Policy)로 영구 차단한다."
+
+  correct_answers: ["A", "B"]
+  answer_count: 2
+
+  grading:
+    difficulty: medium
+    scoring_dimensions:
+      - dimension: action_appropriateness
+        weight: 0.35
+      - dimension: procedure_compliance
+        weight: 0.25
+      - dimension: impact_awareness
+        weight: 0.25
+      - dimension: reasoning_quality
+        weight: 0.15
+
+  provenance:
+    origin: "oh-my-aws-dkr-derived"
+    dkr_version: "decision-knowledge-record/v1"
+    created_date: "2026-04-05"
+    author: "oh-my-aws-exam-generator"
+
+  certification_alignment:
+    - exam: "SOA-C02"
+      domain: "Domain 4: Security and Compliance"
+      task_statement: "Implement security policies for AWS resources"
+    - exam: "DOP-C02"
+      domain: "Domain 6: Security and Compliance"
+      task_statement: "Respond to compromised IAM credentials"
+
+  distractor_analysis:
+    - key: C
+      trap_type: out_of_scope
+      explanation: "침해는 액세스 키 기반이며 콘솔 로그인과 무관하다. 콘솔 비밀번호 변경은 이 사건의 대응 경로가 아니다."
+    - key: D
+      trap_type: common_misconception
+      explanation: "finding을 suppress하는 것은 문제 은폐이며 침해 확산을 방치한다."
+    - key: E
+      trap_type: plausible_but_wrong
+      explanation: "SCP는 장기 예방 조치이며 즉시 완화 조치가 아니다. 먼저 유출 키부터 비활성화해야 한다."

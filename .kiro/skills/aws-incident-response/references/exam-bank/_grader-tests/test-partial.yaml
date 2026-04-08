@@ -1,0 +1,90 @@
+schema: grader-test-case/v1
+
+# ═══════════════════════════════════════════════════════════════
+# Grader Test Case #2: 부분 정답 응답
+# ═══════════════════════════════════════════════════════════════
+# 목적: Grader가 관련은 있지만 완전하지 않은 응답에 대해 부분 점수 + 적절한 failure_type 분류를 하는지 검증
+# 참조 문제: exam-ecs-crash-loop-001 (ECS exitCode 137 OOM)
+# 참조 DKR: ecs-crash-loop
+# 기대 결과: exact_match false, dimension_scores 일부 2-3점, failure_type in [reasoning_error, priority_error]
+# ═══════════════════════════════════════════════════════════════
+
+test_id: "grader-test-partial"
+description: "부분 정답 — 증상은 인식했으나 root_cause 분기에서 오판 (reasoning_error)"
+
+# ─── 입력: question (subset) ───
+question:
+  id: "exam-ecs-crash-loop-001"
+  type: multiple_choice
+  dkr_mapping:
+    scenario_id: "ecs-crash-loop"
+    root_cause_codes: ["ECS-OOM"]
+  correct_answers: ["B"]
+  answer_count: 1
+  grading:
+    difficulty: easy
+    scoring_dimensions:
+      - dimension: diagnosis_accuracy
+        weight: 0.50
+      - dimension: action_appropriateness
+        weight: 0.30
+      - dimension: reasoning_quality
+        weight: 0.20
+
+# ─── 입력: submission (subset) ───
+submission:
+  run_id: "run-2026-04-05T10-00"
+  question_id: "exam-ecs-crash-loop-001"
+  scenario_id: "ecs-crash-loop"
+  selected_answers: ["A"]            # A: 이전 태스크 정의로 롤백 (exitCode 1 해석)
+  reasoning: |
+    태스크가 반복적으로 중지되고 있으며 최근 대용량 파일 처리가 시작되었다.
+    새 고객 온보딩 이후 문제가 발생했으므로 애플리케이션 런타임 에러(exitCode 1)로 추정되며
+    이전 태스크 정의로 롤백하는 것이 가장 안전한 조치라고 판단했다.
+    (주의: stoppedReason의 containers[0].exitCode 필드를 명시적으로 확인하지 않고 시나리오 맥락만으로 판단)
+  decision_trace:
+    - step: 1
+      observation: "태스크 반복 중지 + 새 고객 온보딩"
+      hypothesis: "배포 regression 가능성"
+      eliminated_options: []
+    - step: 2
+      observation: "(exitCode 값을 확인하지 않음)"
+      hypothesis: "앱 에러 (exitCode 1 추정)"
+      eliminated_options: ["OOM 가능성 미검토"]
+  dkr_access_log:
+    dkr_files_read: false
+    allowed_references: ["exam-bank/ecs-crash-loop-001.yaml"]
+  timestamp: "2026-04-05T10:10:00Z"
+
+# ─── 기대 결과 ───
+expected:
+  exact_match:
+    correct: false
+    expected: ["B"]
+    actual: ["A"]
+  total_weighted_score_min: 0.20     # 부분 점수
+  total_weighted_score_max: 0.55     # 완전 정답 수준은 아님
+  dimension_scores_expectations:
+    - dimension_id: diagnosis_accuracy
+      min_score: 0
+      max_score: 1                   # exitCode 137을 137로 읽지 않고 1로 오판
+    - dimension_id: reasoning_quality
+      min_score: 1
+      max_score: 2                   # decision_trace 일부 존재, step 2에서 분기 오류
+    - dimension_id: action_appropriateness
+      min_score: 1
+      max_score: 2                   # 롤백 자체는 안전한 조치이나 최적 아님
+  failure_analysis:
+    has_failure: true
+    primary_failure_candidates:
+      - "reasoning_error"            # decision_tree 분기 조건(exitCode)을 명시적으로 확인 안 함
+      - "priority_error"             # evidence 확인보다 맥락 추측을 먼저 했음
+  allowed_primary_failures: ["reasoning_error", "priority_error"]
+
+# ─── 검증 기준 ───
+validation:
+  - "Grader 출력의 exam-result.exact_match.correct == false"
+  - "0.20 <= exam-result.total_weighted_score <= 0.55"
+  - "exam-result.failure_analysis.has_failure == true"
+  - "exam-result.failure_analysis.primary_failure ∈ [reasoning_error, priority_error]"
+  - "improvement_suggestions에 diagnosis.decision_tree 또는 evidence 확인 강화 관련 항목 포함"
