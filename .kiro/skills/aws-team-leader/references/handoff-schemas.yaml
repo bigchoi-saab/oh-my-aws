@@ -1,0 +1,917 @@
+schema: handoff-schemas/v1
+description: "Agent 간 파일 핸드오프 계약. 모든 agent는 이 스키마에 맞춰 YAML을 생성/소비한다."
+version: "0.1.0"
+
+schemas:
+
+  # ─────────────────────────────────────────────
+  # Incident Response Pipeline
+  # ─────────────────────────────────────────────
+
+  observe:
+    description: "관측 수집 결과 — Diagnostician이 Observe 단계에서 생성"
+    producer: aws-diagnostician
+    consumers: [aws-diagnostician, aws-team-leader]
+    filename: observe.yaml
+    fields:
+      incident_id:
+        type: string
+        description: "인시던트 디렉토리명 (예: 2026-04-03T14-30-lambda-throttle)"
+        required: true
+      timestamp:
+        type: string
+        format: ISO8601
+        description: "관측 시작 시각"
+        required: true
+      # ─── Sim-mode fields (R11 extension) ───
+      # REQUIRED when agents_operating_mode: simulation, OPTIONAL (may be empty/omitted) in live mode.
+      # Grader MUST fail loud — not silently score 0 — if these fields are absent from any sim-mode observe.yaml.
+      # These are the direct scoring targets for the collection_fidelity rubric dimension.
+      sources_read:
+        type: array
+        description: "시뮬레이션 모드에서 agent가 실제로 읽은 fixture 파일 경로 목록. live mode에서는 비어 있어도 됨."
+        sim_mode_required: true
+        items:
+          type: string
+          description: "fixture 파일의 run-상대 경로 (예: evidence/metrics.yaml)"
+      intended_commands:
+        type: array
+        description: "시뮬레이션 모드에서 live AWS 호출 시 사용했을 CLI 명령어와 대응 fixture key. collection_fidelity 채점의 직접 근거."
+        sim_mode_required: true
+        items:
+          command:
+            type: string
+            description: "실제 live 모드였다면 실행했을 aws CLI 명령어 (예: aws cloudwatch get-metric-data ...)"
+          fixture_key:
+            type: string
+            description: "해당 명령어의 응답을 대체하는 fixture key (예: metrics.lambda_duration_p95)"
+      scenario_id:
+        type: string
+        description: "DKR 시나리오 ID (예: lambda-throttle-concurrency-exhaustion)"
+        required: true
+      alarms:
+        type: array
+        description: "활성 CloudWatch 알람 목록"
+        items:
+          alarm_name: string
+          state: string
+          reason: string
+      metrics_snapshot:
+        type: array
+        description: "핵심 메트릭 현재값"
+        items:
+          metric_name: string
+          namespace: string
+          value: number
+          unit: string
+          period: string
+      recent_logs:
+        type: array
+        description: "관련 로그 에러 패턴"
+        items:
+          log_group: string
+          query: string
+          result_summary: string
+          sample_entries: array
+      recent_changes:
+        type: array
+        description: "CloudTrail 최근 변경 이벤트"
+        items:
+          event_time: string
+          event_name: string
+          user: string
+          resource: string
+      aws_health:
+        type: object
+        description: "AWS Health Dashboard 상태"
+        fields:
+          active_events: array
+          scheduled_changes: array
+      resource_state:
+        type: object
+        description: "대상 리소스 현재 설정 스냅샷"
+
+  diagnosis:
+    description: "진단 결과 — Diagnostician이 Reason 단계에서 생성"
+    producer: aws-diagnostician
+    consumers: [aws-team-leader, aws-executor]
+    filename: diagnosis.yaml
+    fields:
+      incident_id:
+        type: string
+        required: true
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+      scenario_id:
+        type: string
+        required: true
+      decision_tree_trace:
+        type: array
+        description: "Decision tree 탐색 경로"
+        items:
+          step: integer
+          question: string
+          check_command: string
+          result: string
+          branch_taken: string
+      root_cause_code:
+        type: string
+        description: "결정된 root cause 코드 (예: THROTTLE-ACCT)"
+        required: true
+      root_cause_name:
+        type: string
+        description: "사람이 읽을 수 있는 root cause 명칭"
+        required: true
+      confidence:
+        type: string
+        enum: [high, medium, low]
+        description: "진단 확신도"
+        required: true
+      evidence:
+        type: array
+        description: "진단 근거"
+        items:
+          type: string
+          source: string
+          detail: string
+      recommended_actions:
+        type: array
+        description: "DKR remediation에서 추출한 권장 조치 목록"
+        required: true
+        items:
+          order: integer
+          name: string
+          type: string
+          command: string
+          risk: string
+          rollback_command: string
+          estimated_impact: object
+      risk_level:
+        type: string
+        enum: [LOW, MEDIUM, HIGH]
+        description: "가장 높은 리스크 수준의 조치 기준"
+        required: true
+
+  execution:
+    description: "조치 실행 결과 — Executor가 Act 단계에서 생성"
+    producer: aws-executor
+    consumers: [aws-team-leader, aws-reporter]
+    filename: execution.yaml
+    fields:
+      incident_id:
+        type: string
+        required: true
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+      actions_executed:
+        type: array
+        description: "실행된 조치 목록"
+        required: true
+        items:
+          order: integer
+          action_name: string
+          command: string
+          risk: string
+          approval_status: string
+          execution_time: string
+          result:
+            type: object
+            fields:
+              success: boolean
+              output: string
+              error: string
+          rollback_command: string
+          rollback_executed: boolean
+
+  verification:
+    description: "검증 결과 — Executor가 Verify 단계에서 생성"
+    producer: aws-executor
+    consumers: [aws-team-leader, aws-reporter]
+    filename: verification.yaml
+    fields:
+      incident_id:
+        type: string
+        required: true
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+      checks:
+        type: array
+        description: "검증 체크 목록"
+        required: true
+        items:
+          name: string
+          check_command: string
+          expected: string
+          actual: string
+          passed: boolean
+      stability_window:
+        type: integer
+        description: "안정성 확인 대기 시간 (초)"
+      overall_result:
+        type: string
+        enum: [success, partial, failed]
+        required: true
+      rollback_triggered:
+        type: boolean
+        description: "롤백이 실행되었는지 여부"
+      rollback_reason:
+        type: string
+        description: "롤백 사유 (rollback_triggered가 true일 때)"
+
+  audit-report:
+    description: "감사 보고서 — Reporter가 Audit 단계에서 생성"
+    producer: aws-reporter
+    consumers: [user, follow-up-systems]
+    filename: audit-report.yaml
+    fields:
+      incident_id:
+        type: string
+        required: true
+      scenario_id:
+        type: string
+        required: true
+      severity:
+        type: string
+        required: true
+      started_at:
+        type: string
+        format: ISO8601
+      resolved_at:
+        type: string
+        format: ISO8601
+      duration_minutes:
+        type: number
+      timeline:
+        type: array
+        description: "전체 타임라인 (timestamp 기준 정렬)"
+        items:
+          timestamp: string
+          phase: string
+          actor: string
+          action: string
+          evidence: string
+      root_cause:
+        type: object
+        fields:
+          code: string
+          name: string
+          confidence: string
+      actions_taken:
+        type: array
+        items:
+          action_name: string
+          risk: string
+          result: string
+      verification_result:
+        type: string
+        enum: [success, partial, failed]
+      follow_ups:
+        type: array
+        description: "후속 조치 목록"
+        items:
+          category: string
+          description: string
+          priority: string
+      cdk_fix_needed:
+        type: boolean
+        description: "CDK 코드 반영이 필요한지 여부"
+        required: true
+      cdk_fix_details:
+        type: string
+        description: "어떤 CDK 변경이 필요한지 (cdk_fix_needed=true일 때)"
+
+  # ─────────────────────────────────────────────
+  # CDK Operations Pipeline
+  # ─────────────────────────────────────────────
+
+  cdk-analysis:
+    description: "CDK 코드 분석 결과 — CDK Analyzer(incident) 또는 Infra Analyzer(infra)가 생성"
+    producer: aws-cdk-analyzer | aws-infra-analyzer
+    consumers: [aws-team-leader, aws-cdk-engineer]
+    filename: cdk-analysis.yaml
+    fields:
+      mode:
+        type: string
+        enum: [incident, infra]
+        description: "동작 모드. incident=인시던트 drift 반영, infra=신규/변경 인프라"
+        required: true
+      incident_id:
+        type: string
+        required_when: "mode: incident"
+        description: "인시던트 모드에서만 필수"
+      request_id:
+        type: string
+        required_when: "mode: infra"
+        description: "인프라 모드에서만 필수"
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+      target_stack:
+        type: string
+        description: "변경 대상 CDK 스택명"
+      target_construct:
+        type: object
+        description: "변경 대상 construct 정보"
+        fields:
+          file_path: string
+          construct_id: string
+          construct_type: string
+          line_range: string
+      current_config:
+        type: object
+        description: "CDK 코드에 정의된 현재 설정값"
+      required_change:
+        type: object
+        description: "변경해야 할 설정값"
+        fields:
+          property: string
+          from_value: string
+          to_value: string
+          reason: string
+      impact_assessment:
+        type: object
+        description: "변경 영향 분석"
+        fields:
+          other_stacks_affected: array
+          deployment_risk: string
+          estimated_downtime: string
+      affected_resources:
+        type: array
+        description: "영향받는 AWS 리소스 목록"
+        items:
+          resource_type: string
+          resource_id: string
+          impact: string
+
+  cdk-changes:
+    description: "CDK 코드 변경 결과 — CDK Engineer가 생성 (incident/infra 양쪽)"
+    producer: aws-cdk-engineer
+    consumers: [aws-team-leader, aws-reporter]
+    filename: cdk-changes.yaml
+    fields:
+      mode:
+        type: string
+        enum: [incident, infra]
+        description: "동작 모드"
+        required: true
+      incident_id:
+        type: string
+        required_when: "mode: incident"
+        description: "인시던트 모드에서만 필수"
+      request_id:
+        type: string
+        required_when: "mode: infra"
+        description: "인프라 모드에서만 필수"
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+      files_modified:
+        type: array
+        description: "수정된 파일 목록"
+        items:
+          file_path: string
+          change_summary: string
+      diff_summary:
+        type: string
+        description: "변경 요약"
+      synth_result:
+        type: object
+        description: "cdk synth 실행 결과"
+        fields:
+          success: boolean
+          output: string
+          errors: array
+      cdk_diff_output:
+        type: string
+        description: "cdk diff 전체 출력"
+      deploy_ready:
+        type: boolean
+        description: "배포 준비 완료 여부"
+        required: true
+
+  cdk-report:
+    description: "CDK 변경 감사 보고서 — Reporter가 생성"
+    producer: aws-reporter
+    consumers: [user]
+    filename: cdk-report.yaml
+    fields:
+      incident_id:
+        type: string
+        required: true
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+      cdk_change_summary:
+        type: string
+        description: "CDK 변경 요약"
+      files_modified:
+        type: array
+        items:
+          file_path: string
+          change_summary: string
+      deploy_status:
+        type: string
+        enum: [deployed, pending_approval, skipped]
+      verification_result:
+        type: string
+        description: "배포 후 검증 결과"
+
+  # ─────────────────────────────────────────────
+  # Exam Pipeline v2 — Skill-Chain Schemas (skill_chain_v2 track)
+  # ─────────────────────────────────────────────
+  # Added by: aws-exam-skill-chain-v2 plan / US-3
+  # ADR-2: DKR-blind exam (agents) + DKR-accessible grading (grader only)
+  # agents_operating_mode: simulation — always "simulation" for Phase 2A/2B;
+  # field exists so every measurement's asterisk is explicit and auditable.
+
+  skill-chain-submission:
+    description: "스킬 체인 실행 결과 제출 — aws-exam-harness가 Track B 실행 후 생성. agents_operating_mode 필드로 측정의 한계(시뮬레이션)를 명시."
+    producer: aws-exam-harness
+    consumers: [aws-grader]
+    filename: skill-chain-submission.yaml
+    fields:
+      run_id:
+        type: string
+        description: "실행 회차 ID (run-{YYYY-MM-DDTHH-MM})"
+        required: true
+      question_id:
+        type: string
+        description: "시험 문제 ID (예: exam-lambda-timeout-001)"
+        required: true
+      scenario_id:
+        type: string
+        description: "원본 DKR 시나리오 ID"
+        required: true
+      track:
+        type: string
+        enum: [skill_chain_v2]
+        description: "항상 skill_chain_v2 (mc_only_v1와 구별)"
+        required: true
+      mc_answer_derived:
+        type: string
+        description: "diagnosis.root_cause_code에서 역추론한 MC 답 키 (비교용, 채점은 별도)"
+      artifact_bundle:
+        type: object
+        description: "수집된 아티팩트 파일 경로 (run 상대경로)"
+        fields:
+          observe_yaml: string
+          diagnosis_yaml: string
+          execution_yaml: string        # Phase 2C부터 채워짐
+          verification_yaml: string     # Phase 2C부터 채워짐
+          audit_report_yaml: string     # Phase 2C부터 채워짐
+      agents_invoked:
+        type: array
+        description: "실행에 참여한 에이전트 목록 (예: [aws-diagnostician, aws-reporter])"
+        items:
+          type: string
+      dkr_access_log:
+        type: string
+        description: "_dkr_access_log.yaml 파일 경로 (DKR-blind 준수 증거)"
+        required: true
+      chain_failure:
+        type: string
+        description: "Track B 실패 사유. 성공 시 null. 예: token_budget_exceeded, dkr_blind_violation, agent_error"
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+      agents_operating_mode:
+        type: string
+        enum: [simulation, live]
+        description: "항상 simulation (Phase 2A/2B). 측정의 한계를 감사 가능하게 명시하는 필드."
+        required: true
+
+  skill-chain-result:
+    description: "스킬 체인 채점 결과 — Grader가 skill-chain-submission 채점 후 생성"
+    producer: aws-grader
+    consumers: [aws-exam-skill]
+    filename: skill-chain-result.yaml
+    fields:
+      run_id:
+        type: string
+        required: true
+      question_id:
+        type: string
+        required: true
+      scenario_id:
+        type: string
+        required: true
+      track:
+        type: string
+        enum: [skill_chain_v2]
+        required: true
+      agents_operating_mode:
+        type: string
+        enum: [simulation, live]
+        description: "submission에서 상속. 모든 결과 파일에 기록하여 측정 한계 감사 추적."
+        required: true
+      # ─── 2차원 스킬 체인 점수 ───
+      chain_dimensions:
+        type: object
+        description: "4개 독립 차원 점수. 각 차원은 0-3 점수."
+        fields:
+          collection_fidelity:
+            type: integer
+            range: [0, 3]
+            description: "live AWS 모드에서 올바른 evidence를 수집했을지 여부 (observe.yaml.sources_read + intended_commands 기반)"
+          reasoning_fidelity:
+            type: integer
+            range: [0, 3]
+            description: "주입된 fixture 기반으로 올바르게 진단했는지 여부 (diagnosis.root_cause_code vs DKR ground truth)"
+          chain_coverage:
+            type: integer
+            range: [0, 3]
+            description: "파이프라인 단계 중 유효한 아티팩트를 생성한 단계 수 (observe/diagnose/execute/verify/report)"
+          artifact_completeness:
+            type: integer
+            range: [0, 3]
+            description: "각 아티팩트가 필수 필드를 모두 포함하고 스키마를 준수하는지 여부"
+      # ─── MC 트랙과의 비교 ───
+      compared_to_mc_score:
+        type: float
+        description: "같은 문제의 mc_score와의 delta (reasoning_fidelity/3 - mc_score). 양수면 스킬체인이 우세."
+      mc_score_ref:
+        type: float
+        description: "비교 기준이 된 mc_score (0.0-1.0)"
+      # ─── 채점 근거 ───
+      grading_evidence:
+        type: object
+        description: "각 차원 채점 근거"
+        fields:
+          collection_fidelity_evidence: string
+          reasoning_fidelity_evidence: string
+          chain_coverage_evidence: string
+          artifact_completeness_evidence: string
+          missing_sim_fields_error: string   # sources_read/intended_commands 누락 시 오류 메시지
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+
+  reflection-v1:
+    description: "실패 귀인 및 개선 제안 — aws-exam-reflector가 Phase 4에서 생성"
+    producer: aws-exam-reflector
+    consumers: [aws-exam-skill, user]
+    filename: reflection.yaml
+    fields:
+      run_id:
+        type: string
+        required: true
+      delta_analysis:
+        type: array
+        description: "문제별 mc_vs_skill_chain_delta 분석"
+        items:
+          question_id: string
+          mc_score: float
+          reasoning_fidelity: float
+          collection_fidelity: float
+          delta: float             # reasoning_fidelity - mc_score
+          notes: string
+      failure_attribution:
+        type: array
+        description: "실패 귀인 목록. 각 항목은 특정 파일+섹션을 지목."
+        items:
+          question_id:
+            type: string
+          layer:
+            type: string
+            enum:
+              - skill:aws-incident-response
+              - skill:aws-cdk-operations
+              - skill:aws-exam
+              - agent:aws-diagnostician
+              - agent:aws-executor
+              - agent:aws-reporter
+              - agent:aws-cdk-analyzer
+              - agent:aws-cdk-engineer
+              - agent:aws-grader
+              - dkr:scenarios/{name}
+              - harness:fixture-mapping
+              - rubric:grading-rubric
+              - unclear
+          file_path:
+            type: string
+            description: "귀인 대상 파일 절대 경로"
+          section:
+            type: string
+            description: "YAML 경로 또는 마크다운 헤더 (예: root_causes[TIMEOUT-COLD-JAVA-NOSNAP].description)"
+          failure_type:
+            type: string
+          proposed_change:
+            type: string
+            description: "무엇을 어떻게 바꿔야 하는지 짧은 서술"
+          proposed_diff:
+            type: string
+            description: "unified-diff 스니펫 (선택)"
+          decision_table_row_cited:
+            type: string
+            description: "reflection-protocol.md의 어느 decision table row를 적용했는지. 미분류는 'unclear'."
+            required: true
+          requires_human_approval:
+            type: boolean
+            description: "DKR 대상 제안은 반드시 true"
+          approval_reason:
+            type: string
+      top_proposals:
+        type: array
+        description: "빈도 가중 우선순위 기준 상위 3개 제안"
+        items:
+          proposal_id: string
+          question_id: string
+          layer: string
+          file_path: string
+          priority: string    # high | medium | low
+          summary: string
+          proposal_file: string   # proposals/{question_id}-{seq}.md 경로
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+
+  # ─────────────────────────────────────────────
+  # Exam Pipeline (aws-team-leader와 독립 — aws-exam skill이 직접 오케스트레이션)
+  # ─────────────────────────────────────────────
+  # 참조: .omc/plans/aws-exam-self-learning-pipeline.md § 단계 2.2
+  # ADR-1: team-leader dispatch table 수정 불필요 (완전 독립)
+  # ADR-2: DKR-blind exam + DKR-accessible grading (Hybrid Path)
+
+  exam-submission:
+    description: "스킬의 시험 응답 — aws-exam skill이 DKR-blind 상태에서 생성"
+    producer: aws-exam-skill
+    consumers: [aws-grader]
+    filename: exam-submission.yaml
+    fields:
+      run_id:
+        type: string
+        description: "실행 회차 ID (run-{YYYY-MM-DDTHH-MM})"
+        required: true
+      question_id:
+        type: string
+        description: "시험 문제 ID (예: exam-lambda-throttle-001)"
+        required: true
+      scenario_id:
+        type: string
+        description: "원본 DKR 시나리오 ID (문제의 dkr_mapping.scenario_id와 일치)"
+        required: true
+      selected_answers:
+        type: array
+        description: "응답이 선택한 답 키 배열 (예: [A] 또는 [A, C])"
+        required: true
+      reasoning:
+        type: string
+        description: "답 선택 근거 (자유 서술, DKR 참조 없이 내재화된 지식 기반)"
+        required: true
+      decision_trace:
+        type: array
+        description: "추론 과정 (decision tree 탐색 기록)"
+        items:
+          step: integer
+          observation: string
+          hypothesis: string
+          eliminated_options: array
+      dkr_access_log:
+        type: object
+        description: "DKR-blind 프로토콜 준수 증거 (ADR-2)"
+        fields:
+          dkr_files_read: boolean       # false여야 함 (DKR-blind)
+          allowed_references: array     # 허용된 참조 (문제 YAML만)
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+
+  exam-result:
+    description: "채점 결과 — Grader Agent가 생성 (DKR ground truth 참조)"
+    producer: aws-grader
+    consumers: [aws-exam-skill]
+    filename: exam-result.yaml
+    fields:
+      run_id:
+        type: string
+        required: true
+      question_id:
+        type: string
+        required: true
+      scenario_id:
+        type: string
+        required: true
+      # ─── Phase 1: Exact Match ───
+      exact_match:
+        type: object
+        fields:
+          correct: boolean
+          expected: array
+          actual: array
+      # ─── Phase 2: Rubric Scoring ───
+      dimension_scores:
+        type: array
+        items:
+          dimension_id: string
+          score: integer          # 0-3
+          max_score: integer      # 3
+          weight: float
+          weighted_score: float
+          evidence: string        # 채점 근거 (DKR 어느 부분과 대조했는지)
+      total_weighted_score:
+        type: float               # 0.0-1.0
+        required: true
+      # ─── Phase 3: Failure Analysis ───
+      failure_analysis:
+        type: object
+        fields:
+          has_failure: boolean
+          failure_types: array    # [knowledge_gap, reasoning_error, priority_error, procedural_error]
+          primary_failure: string
+          details: string
+          affected_dkr_sections: array
+      # ─── Phase 4: Improvement Suggestions ───
+      improvement_suggestions:
+        type: array
+        items:
+          target: string          # DKR 섹션 또는 skill 영역 (예: "dkr:lambda-throttle.root_causes")
+          action: string          # 구체적 개선 내용
+          priority: string        # high | medium | low
+          failure_type: string    # 연관 failure_type
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+
+  exam-run-summary:
+    description: "시험 회차 전체 요약 — Grader Agent가 마지막 문제 후 생성"
+    producer: aws-grader
+    consumers: [aws-exam-skill]
+    filename: run-summary.yaml
+    fields:
+      run_id:
+        type: string
+        required: true
+      total_questions:
+        type: integer
+        required: true
+      correct_count:
+        type: integer
+        required: true
+      accuracy:
+        type: float               # correct_count / total_questions
+        required: true
+      average_weighted_score:
+        type: float               # 모든 문제의 total_weighted_score 평균
+        required: true
+      dimension_averages:
+        type: array
+        items:
+          dimension_id: string
+          average_score: float    # 해당 차원의 모든 문제 평균 (0.0-1.0)
+      failure_distribution:
+        type: object
+        description: "4개 실패 유형별 발생 건수"
+        fields:
+          knowledge_gap: integer
+          reasoning_error: integer
+          priority_error: integer
+          procedural_error: integer
+      regression_flags:
+        type: array
+        description: "이전 회차 대비 점수가 하락한 문제 목록"
+        items:
+          question_id: string
+          previous_score: float
+          current_score: float
+          delta: float
+      top_improvement_areas:
+        type: array
+        description: "빈도 기반 개선 우선순위"
+        items:
+          area: string             # DKR 섹션 또는 skill 영역
+          frequency: integer       # 얼마나 자주 실패 원인이었는지
+          priority: string         # high | medium | low
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+
+  # ─────────────────────────────────────────────
+  # Infrastructure Lifecycle Pipeline
+  # ─────────────────────��───────────────────────
+  # Added by: CDK Infrastructure Lifecycle plan (RALPLAN v2 consensus)
+  # aws-team-leader가 infra-triage에서 생성, aws-infra-analyzer가 소비
+
+  infra-request:
+    description: "인프라 요청 명세 — Team Leader가 infra-triage에서 생성"
+    producer: aws-team-leader
+    consumers: [aws-infra-analyzer]
+    filename: infra-request.yaml
+    fields:
+      request_id:
+        type: string
+        description: "요청 ID (req-{YYYY-MM-DDTHH-MM}-{summary})"
+        required: true
+      request_type:
+        type: string
+        enum: [create, modify]
+        description: "요청 유형. delete는 v2로 이연."
+        required: true
+      description:
+        type: string
+        description: "사용자가 요청한 인프라 내용 (자유 서술)"
+        required: true
+      target_service:
+        type: string
+        description: "주요 AWS 서비스 (lambda, ecs, rds, dynamodb, s3, vpc 등)"
+      architecture_pattern:
+        type: string
+        description: "aws-cdk-infra 카탈로그 패턴 (선택). 예: lambda-apigw, ecs-alb, s3-cloudfront"
+      target_environment:
+        type: string
+        enum: [dev, staging, prod]
+        default: dev
+        description: "배포 대상 환경. 기본값 dev."
+      constraints:
+        type: object
+        description: "제약 조건 (VPC ID, 리전, 예산, 기존 리소스 참조 등)"
+      existing_stack:
+        type: string
+        description: "modify 시: 변경 대상 CDK 스택명"
+      existing_construct:
+        type: string
+        description: "modify 시: 변경 대상 construct ID"
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
+
+  infra-plan:
+    description: "인프라 구현 계획 — Infra Analyzer가 생성, CDK Engineer가 소비"
+    producer: aws-infra-analyzer
+    consumers: [aws-team-leader, aws-cdk-engineer]
+    filename: infra-plan.yaml
+    fields:
+      request_id:
+        type: string
+        required: true
+      mode:
+        type: string
+        enum: [infra]
+        description: "항상 infra (CDK Engineer의 mode 분기에 사용)"
+        required: true
+      request_type:
+        type: string
+        enum: [create, modify]
+        required: true
+      target_stack:
+        type: string
+        description: "대상 또는 신규 CDK 스택명"
+        required: true
+      target_construct:
+        type: object
+        description: "대상 construct 정보 (modify 시 기존, create 시 신규)"
+        fields:
+          file_path: string
+          construct_id: string
+          construct_type: string
+          line_range: string
+      planned_changes:
+        type: array
+        description: "변경 계획 목록 (modify 시)"
+        items:
+          property: string
+          from_value: string
+          to_value: string
+          reason: string
+      new_constructs:
+        type: array
+        description: "생성할 construct 목록 (create 시)"
+        items:
+          construct_type: string
+          construct_id: string
+          config: object
+          dependencies: array
+      cdk_project_path:
+        type: string
+        description: "CDK 프로젝트 루트 경로 (cdk.json 위치)"
+        required: true
+      impact_assessment:
+        type: object
+        description: "변경 영향 분석"
+        fields:
+          other_stacks_affected: array
+          deployment_risk: string
+          estimated_downtime: string
+      iteration_budget:
+        type: integer
+        default: 3
+        description: "CDK Engineer의 최대 synth 재시도 횟수"
+      timestamp:
+        type: string
+        format: ISO8601
+        required: true
