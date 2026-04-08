@@ -1,170 +1,130 @@
-# AWS Log Source Map
+# AWS Service Log Source Map
 
-> 목적: AWS 장애 조사 시 어디서 어떤 로그를 어떻게 조회하는지 빠르게 참조
-> 원본: `docs/research/06-aws-incident-log-reference.md`
-
----
-
-## 핵심 구분: CloudWatch Logs vs S3
-
-```
-CloudWatch Logs (CW Logs Insights로 직접 쿼리):
-  Lambda 실행 로그 / API Gateway 로그 / ECS 컨테이너 로그 /
-  RDS 로그 / VPC Flow Logs (선택) / WAF 로그 (선택) /
-  Route 53 Resolver Query Logs / EKS 컨테이너 로그
-
-S3 저장 (Athena 또는 S3 Select로 쿼리):
-  ALB/NLB Access Logs / CloudFront Standard Access Logs /
-  S3 Server Access Logs / CloudTrail 이벤트 / VPC Flow Logs (선택)
-```
+> Agent가 장애 조사 시 참조하는 서비스별 로그/메트릭/이벤트 조회 룩업 테이블
+> 원본: docs/research/06-aws-incident-log-reference.md
 
 ---
 
-## 서비스별 로그 소스
+## 1. CloudWatch Logs에 있는 로그 (CW Logs Insights로 조회)
 
-| 서비스 | 로그 종류 | 저장 위치 | 기본 활성화 | 접근 방법 |
-|--------|----------|----------|------------|----------|
-| **Lambda** | 실행 로그 (stdout/stderr) | CW Logs `/aws/lambda/<함수명>` | O | CW Logs Insights |
-| **Lambda** | X-Ray 트레이스 | X-Ray API | X-Ray 활성화 필요 | X-Ray API/콘솔 |
-| **API Gateway** | Access Logs | CW Logs `API-Gateway-Execution-Logs_<API_ID>/<Stage>` | Stage에서 활성화 필요 | CW Logs Insights |
-| **API Gateway** | Execution Logs | 위와 동일 | Stage에서 활성화 필요 | CW Logs Insights |
-| **ECS/Fargate** | 컨테이너 stdout/stderr | CW Logs `/ecs/<태스크정의명>` (awslogs 드라이버) | 태스크 정의 설정 필요 | CW Logs Insights |
-| **ECS/Fargate** | 서비스 이벤트 | ECS API (90일 보존) | O | `aws ecs describe-services` |
-| **RDS** | Error Log | CW Logs `/aws/rds/instance/<인스턴스명>/error` | 파라미터 그룹 + CW 내보내기 설정 필요 | CW Logs Insights |
-| **RDS** | Slow Query Log | CW Logs `/aws/rds/instance/<인스턴스명>/slowquery` | 파라미터 그룹 설정 필요 | CW Logs Insights |
-| **RDS** | General Log | CW Logs `/aws/rds/instance/<인스턴스명>/general` | 성능 영향 있음, 주의 | CW Logs Insights |
-| **ALB/NLB** | Access Logs | **S3 버킷** (지정 경로) | 로드밸런서 속성에서 활성화 필요 | S3 → Athena |
-| **CloudFront** | Standard Access Logs | **S3 버킷** | Distribution 설정에서 활성화 필요 | S3 → Athena |
-| **CloudFront** | Real-Time Logs | CW Logs 또는 Kinesis | Distribution 설정에서 활성화 필요 | CW Logs Insights |
-| **VPC** | Flow Logs | CW Logs **또는** S3 (선택) | VPC/서브넷/ENI에서 활성화 필요 | CW Logs Insights 또는 Athena |
-| **S3** | Server Access Logs | **S3 버킷** (별도 버킷에 저장) | 버킷 속성에서 활성화 필요 | S3 → Athena |
-| **CloudTrail** | Management Events | S3 + CW Logs (선택) | Trail 생성 필요 | CloudTrail API 또는 Athena |
-| **CloudTrail** | Data Events (S3/Lambda) | S3 | Trail에서 Data Events 활성화 필요 | S3 → Athena |
-| **WAF** | Web ACL Logs | S3 / CW Logs / Kinesis Firehose | Web ACL에서 활성화 필요 | Athena 또는 CW Logs |
-| **Route 53** | Resolver Query Logs | CW Logs | Resolver 쿼리 로깅 활성화 필요 | CW Logs Insights |
-| **EKS** | 컨테이너 로그 | CW Logs `/aws/eks/...` | Container Insights 또는 Fluent Bit 필요 | CW Logs Insights |
+| 서비스 | 로그 그룹 | 활성화 | 주요 쿼리 |
+|--------|----------|--------|----------|
+| **Lambda** | `/aws/lambda/<함수명>` | 기본 | `filter @message like "Task timed out"` |
+| **API Gateway** | `API-Gateway-Execution-Logs_<API_ID>/<Stage>` | Stage 설정 | `filter status >= 500` |
+| **ECS/Fargate** | `/ecs/<태스크정의명>` | Task Definition logConfiguration | `filter @message like /OOMKilled/` |
+| **RDS Error** | `/aws/rds/instance/<인스턴스명>/error` | 파라미터 그룹 + CW 내보내기 | `filter @message like /FATAL\|PANIC/` |
+| **RDS Slow Query** | `/aws/rds/instance/<인스턴스명>/slowquery` | 파라미터 그룹 | `parse @message /duration: (?<duration>.*?) ms/` |
+| **VPC Flow Logs** | `/aws/vpc/flow-logs/<VPC_NAME>` (선택) | VPC 설정 | `filter action = "REJECT"` |
+| **WAF** | (선택 CW Logs) | Web ACL 설정 | 서비스별 |
 
----
+## 2. S3에 있는 로그 (Athena로 조회)
 
-## Lambda — CloudWatch Logs Insights 쿼리
+| 서비스 | 로그 위치 | 활성화 | 조회 방법 |
+|--------|----------|--------|----------|
+| **ALB/NLB Access Logs** | S3 버킷 (지정 경로) | LB 속성 | S3 → Athena |
+| **CloudFront Standard Logs** | S3 버킷 | Distribution 설정 | S3 → Athena |
+| **S3 Server Access Logs** | S3 버킷 (다른 버킷) | 버킷 속성 | S3 → Athena |
+| **CloudTrail Events** | S3 + CW Logs (선택) | Trail 생성 | Athena 또는 CloudTrail API |
 
-```sql
--- 타임아웃 탐지
-fields @timestamp, @requestId, @message, @logStream
-| filter @message like "Status: timeout" or @message like /Task timed out/
-| sort @timestamp desc
-| limit 100
-```
+## 3. API로만 조회 (CloudWatch Logs가 아님)
 
-```sql
--- Duration / 메모리 분석 (REPORT 라인)
-filter @type = "REPORT"
-| stats avg(@duration) as avgDur, max(@duration) as maxDur,
-        max(@maxMemoryUsed/1024/1024) as maxMemMB,
-        pct(@duration, 95) as p95
-  by bin(5m)
-```
+| 서비스 | 조회 방법 | 보존 기간 |
+|--------|----------|----------|
+| **ECS 서비스 이벤트** | `aws ecs describe-services` | 90일 |
+| **ECS 태스크 중지 사유** | `aws ecs describe-tasks` | 90일 |
+| **AWS Health 이벤트** | `aws health describe-events` | 90일 |
+| **CloudTrail 이벤트** | CloudTrail API 또는 Athena | 90일 (LookupEvents) |
+| **X-Ray 트레이스** | X-Ray API | 30일 |
 
-```sql
--- 콜드 스타트 탐지
-filter @type = "REPORT" and @initDuration > 0
-| stats max(@initDuration) as maxInit, avg(@initDuration) as avgInit, count() as coldStarts
-  by bin(5m)
-```
+## 4. 서비스별 주요 CloudWatch Metrics
 
-```sql
--- 쓰로틀링 탐지
-fields @timestamp, @message
-| filter @message like /Rate exceeded/ or @message like /TooManyRequestsException/
-| sort @timestamp desc
-| limit 100
-```
+### Lambda
+| 메트릭 | 통계 | 임계값 |
+|--------|------|--------|
+| `Duration` | p95, p99 | > timeout × 0.8 |
+| `Errors` | Sum | > 0 |
+| `Throttles` | Sum | > 0 |
+| `ConcurrentExecutions` | Max | ≈ Account Quota |
+| `Invocations` | Sum | 트래픽 확인 |
+| `IteratorAge` | Max | 급증 = 처리 지연 |
 
----
+### RDS
+| 메트릭 | 통계 | 임계값 |
+|--------|------|--------|
+| `CPUUtilization` | Average | > 80% |
+| `FreeStorageSpace` | Minimum | < 10GB |
+| `DatabaseConnections` | Max | > max_connections × 0.8 |
+| `ReadLatency` / `WriteLatency` | p99 | > 50ms |
+| `FreeableMemory` | Minimum | < 512MB |
+| `DiskQueueDepth` | Average | > 10 |
 
-## RDS — CloudWatch Logs Insights 쿼리
+### ECS
+| 메트릭 | 통계 | 의미 |
+|--------|------|------|
+| `CPUUtilization` | Average | CPU 병목 |
+| `MemoryUtilization` | Average | 메모리 압박 |
+| `RunningTaskCount` | Average | 급감 = 크래시 |
+| `RestartCount` (ContainerInsights) | Sum | 크래시 루프 |
 
-```sql
--- 슬로우 쿼리 탐지 (PostgreSQL)
-fields @timestamp, @message
-| parse @message /duration: (?<duration>.*?) ms\s+statement: (?<statement>.*?)$/
-| filter duration > 1000
-| sort duration desc
-| limit 50
-```
+### API Gateway
+| 메트릭 | 통계 | 임계값 |
+|--------|------|--------|
+| `5XXError` | Sum | > 0 |
+| `4XXError` | Sum | 트렌드 비교 |
+| `Latency` | p95 | > SLA |
+| `IntegrationLatency` | p95 | 백엔드 병목 지표 |
 
-```sql
--- 에러 로그에서 심각 메시지
-fields @timestamp, @message
-| filter @message like /FATAL|PANIC|ERROR/
-| sort @timestamp desc
-| limit 100
-```
+### DynamoDB
+| 메트릭 | 통계 | 임계값 |
+|--------|------|--------|
+| `ThrottledRequests` | Sum | > 0 |
+| `ConsumedReadCapacityUnits` | Sum | 프로비저닝 대비 |
+| `ConsumedWriteCapacityUnits` | Sum | 프로비저닝 대비 |
 
-```sql
--- Deadlock 탐지
-fields @timestamp, @message
-| filter @message like /deadlock detected/
-| sort @timestamp desc
-```
+### CloudFront
+| 메트릭 | 통계 | 의미 |
+|--------|------|------|
+| `CacheHitRate` | Average | 캐시 적중률 |
+| `OriginLatency` | p95 | 원본 응답 지연 |
+| `5xxErrorRate` | Average | 서버 에러율 |
+| `4xxErrorRate` | Average | 클라이언트 에러율 |
 
----
+### 네트워크
+| 메트릭 | 네임스페이스 | 의미 |
+|--------|-------------|------|
+| `ErrorPortAllocation` | AWS/NATGateway | NAT 포트 고갈 |
+| `PacketsDropCount` | AWS/NATGateway | NAT 패킷 드롭 |
+| `conntrack_allowance_exceeded` | AWS/EC2 (ENA) | 연결 추적 한계 |
 
-## VPC Flow Logs — CloudWatch Logs Insights 쿼리
+## 5. 교차 서비스 상관 키
 
-```sql
--- REJECT 탐지 (SG/NACL 차단)
-fields @timestamp, srcAddr, dstAddr, srcPort, dstPort, protocol, action
-| filter action = "REJECT"
-| sort @timestamp desc
-| limit 100
-```
+| 상황 | 키 | 포함된 로그 |
+|------|-----|------------|
+| API Gateway → Lambda | `x-amzn-requestid` / `requestId` | API GW + Lambda Logs |
+| 전체 요청 추적 | `traceId` / `@traceId` | X-Ray + 모든 서비스 |
+| 보안 감사 | `principal ARN` | CloudTrail + 모든 서비스 |
+| 네트워크 경로 | `source IP` + `destination IP:Port` | VPC Flow Logs + WAF + ALB |
+| ECS 태스크 추적 | `taskArn` | ECS Events + Container Logs |
 
-```sql
--- 특정 대상 포트로의 REJECT 집계
-stats count(*) as rejects by dstPort, protocol
-| filter action = "REJECT"
-| sort rejects desc
-```
-
----
-
-## API Gateway — CloudWatch Logs Insights 쿼리
-
-```sql
--- 5xx 에러 탐지
-fields @timestamp, status, ip, path, httpMethod, responseLatency, integrationLatency
-| filter status >= 500
-| sort @timestamp desc
-| limit 100
-```
-
-```sql
--- 상태코드 분포
-stats count(*) by status
-| sort status
-```
-
----
-
-## 장애 조사 공통 순서
+## 6. 장애 조사 공통 순서
 
 ```
 Step 1: 시간 창 확정 (UTC 기준, T-15m ~ T+15m → 증거에 따라 확장)
-Step 2: 상관 키 확보 (requestId, x-amzn-requestid, traceId, principal ARN, source IP)
+Step 2: 상관 키 확보 (requestId, traceId, principal ARN, source IP)
 Step 3: 제어면(CloudTrail) + 데이터면(서비스 로그) 동시 수집
 Step 4: 보안 사건인 경우 증거 보존 먼저 (스냅샷, 변경 금지)
-Step 5: 서비스별 심층 조사
+Step 5: 서비스별 심층 조사 (위 테이블 참조)
 ```
 
----
+## 7. AWS Health + EventBridge
 
-## ECS 태스크 exitCode 해석
+```bash
+# 활성 AWS Health 이벤트 조회
+aws health describe-events \
+  --filter '{"services":["LAMBDA","ECS","RDS","S3","EC2","CLOUDFRONT"],
+             "eventStatusCodes":["open","upcoming"]}'
 
-| exitCode | 의미 | 조치 |
-|----------|------|------|
-| `0` | 정상 종료 | 의도된 종료인지 확인 |
-| `1` | 애플리케이션 에러 | 컨테이너 로그에서 예외 확인 |
-| `137` | SIGKILL (OOM 또는 수동 stop) | 메모리 사용량 + 태스크 메모리 한계 비교 |
-| `139` | Segmentation Fault | 애플리케이션 코드/의존성 버그 |
-| `143` | SIGTERM (정상 종료 요청) | 배포/스케일다운에 의한 것인지 확인 |
+# 영향받는 리소스 확인
+aws health describe-affected-entities \
+  --filter '{"eventArns":["arn:aws:health:..."]}'
+```
