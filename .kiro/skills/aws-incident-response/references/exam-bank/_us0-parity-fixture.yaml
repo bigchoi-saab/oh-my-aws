@@ -1,0 +1,79 @@
+# _us0-parity-fixture.yaml — US-0 parity baseline fixture question
+#
+# PURPOSE: Reserved exclusively for US-0 parity test. NOT in _index.yaml.
+# DO NOT add to exam-bank/_index.yaml. DO NOT use in normal exam runs.
+#
+# This question is designed to mirror the lambda-throttle scenario
+# that the user will capture during their live-incident bootstrap run.
+# The scenario evidence here should be close enough to a real lambda-throttle
+# incident that aws-diagnostician produces the same root_cause_code against
+# both the real _parity-baseline/ artifacts and the fixture generated from this file.
+#
+# USAGE (US-0 execution, NOT scaffold):
+#   1. User completes live-incident bootstrap (real lambda-throttle incident).
+#   2. Harness (US-1) generates sim-incident fixture from this file.
+#   3. aws-diagnostician runs in sim mode against the fixture → produces diagnosis.yaml.
+#   4. run_us0_parity.py diffs the sim diagnosis.yaml against _parity-baseline/diagnosis.yaml.
+#   5. parity_check.py exit 0 = Phase 2A may proceed.
+#
+# TODO [US-0 execution]: Update scenario.evidence items below to match
+# the actual symptoms observed in the user's live baseline incident once
+# the bootstrap run is complete. The current evidence is a representative
+# lambda-throttle scenario for scaffold purposes.
+
+id: _us0-parity-fixture
+title: "Lambda Throttle Parity Test (US-0 reserved — not for exam use)"
+category: compute
+type: diagnostic
+exam_use: parity_only  # signals harness to exclude from normal exam runs
+
+scenario:
+  title: "Lambda 함수 급격한 오류율 증가 — Throttling 의심"
+  situation: |
+    Lambda 함수 `api-handler`가 최근 배포 후 급격한 오류율 증가를 보이고 있습니다.
+    CloudWatch 메트릭에서 Throttles 카운트가 급증하고 있으며,
+    일부 요청은 429 ThrottlingException으로 실패하고 있습니다.
+    동시 실행 제한에 도달했을 가능성이 있습니다.
+  constraint: "실시간 프로덕션 트래픽 영향 중. 빠른 진단 필요."
+  evidence:
+    - type: metric
+      source: "AWS/Lambda Throttles"
+      value: "Throttles: 847건/분 (정상 0건/분 → 급증)"
+    - type: metric
+      source: "AWS/Lambda ConcurrentExecutions"
+      value: "ConcurrentExecutions: 1000 (계정 기본 한도 도달)"
+    - type: metric
+      source: "AWS/Lambda Errors"
+      value: "Errors: 412건/분, ErrorRate: 38%"
+    - type: log
+      source: "Lambda 로그 (CloudWatch Logs Insights)"
+      value: |
+        @message like 'ThrottlingException' — 847건 (최근 5분)
+        @message like 'Rate exceeded' — 412건
+        평균 Duration: 2,340ms (정상 범위 내)
+    - type: alarm
+      source: "CloudWatch Alarm: LambdaThrottleAlarm"
+      value: "ALARM 상태. Threshold: Throttles > 100/min for 2 datapoints."
+    - type: cli_output
+      source: "aws lambda get-account-settings"
+      value: |
+        {
+          "TotalCodeSize": 85000000,
+          "TotalConcurrentExecutions": 1000,
+          "UnreservedConcurrentExecutions": 0
+        }
+
+# Ground truth hints (for US-0 parity calibration only — NOT shown to agents)
+# These are NOT DKR scenario answers; they are scaffold notes for the test author.
+# TODO [US-0 execution]: Verify these match the real baseline incident's diagnosis.yaml
+_parity_calibration_notes:
+  expected_root_cause_code: "LAMBDA_CONCURRENT_EXECUTION_LIMIT"
+  expected_actions_top3:
+    - "request-concurrency-limit-increase"
+    - "configure-reserved-concurrency-per-function"
+    - "implement-sqs-buffering-for-throttled-requests"
+  fixture_types_covered: [metric, log, alarm, cli_output]
+  note: |
+    These hints are for human test authors to validate the scenario design.
+    They are NOT read by agents. The DKR-blind invariant applies to this file
+    for all diagnostic agents; only aws-grader reads it as ground truth.

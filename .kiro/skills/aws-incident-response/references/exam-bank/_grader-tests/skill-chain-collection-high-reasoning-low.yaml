@@ -1,0 +1,166 @@
+schema: grader-test-case/v1
+
+# ═══════════════════════════════════════════════════════════════
+# Grader Test Case: High collection_fidelity, Low reasoning_fidelity
+# ═══════════════════════════════════════════════════════════════
+# 목적: collection_fidelity(올바른 질문)와 reasoning_fidelity(잘못된 결론)가
+#       독립적으로 채점되는지 검증.
+#       체인이 올바른 AWS CLI 명령어를 요청했으나 잘못된 root_cause를 도출한 케이스.
+# 참조 문제: exam-lambda-timeout-001 (Lambda Cold Start / SnapStart 미활성화)
+# 참조 DKR: lambda-timeout-cold-start (root_cause: TIMEOUT-COLD-JAVA-NOSNAP)
+# 기대 결과:
+#   collection_fidelity >= 2  (올바른 신호를 요청함)
+#   reasoning_fidelity  == 0  (완전히 다른 root_cause 결론)
+#   chain_coverage      >= 2  (observe + diagnose 아티팩트 있음)
+#   artifact_completeness >= 2 (필수 필드 충족)
+# ═══════════════════════════════════════════════════════════════
+
+test_id: "skill-chain-collection-high-reasoning-low"
+description: "체인이 올바른 evidence를 수집했으나 잘못된 결론을 도출 — collection_fidelity HIGH, reasoning_fidelity LOW 분리 채점 검증"
+track: skill_chain_v2
+agents_operating_mode: simulation
+
+# ─── 입력: question (exam-question/v1 subset) ───
+question:
+  id: "exam-lambda-timeout-001"
+  type: multiple_choice
+  dkr_mapping:
+    scenario_id: "lambda-timeout-cold-start"
+    root_cause_codes: ["TIMEOUT-COLD-JAVA-NOSNAP"]
+  correct_answers: ["C"]
+  answer_count: 1
+  grading:
+    difficulty: medium
+    scoring_dimensions:
+      - dimension: diagnosis_accuracy
+        weight: 0.40
+      - dimension: action_appropriateness
+        weight: 0.35
+      - dimension: reasoning_quality
+        weight: 0.25
+
+# ─── 입력: skill-chain-submission ───
+submission:
+  run_id: "run-2026-04-05T16-00"
+  question_id: "exam-lambda-timeout-001"
+  scenario_id: "lambda-timeout-cold-start"
+  track: skill_chain_v2
+  agents_operating_mode: simulation
+  artifact_bundle:
+    observe_yaml: "sim-incidents/exam-lambda-timeout-001/observe.yaml"
+    diagnosis_yaml: "sim-incidents/exam-lambda-timeout-001/diagnosis.yaml"
+  agents_invoked: ["aws-diagnostician"]
+  dkr_access_log: "sim-incidents/exam-lambda-timeout-001/_dkr_access_log.yaml"
+  timestamp: "2026-04-05T16:05:00Z"
+
+# ─── 입력: observe.yaml (sim-mode — sources_read + intended_commands 필수) ───
+observe_yaml:
+  incident_id: "exam-lambda-timeout-001"
+  timestamp: "2026-04-05T16:01:00Z"
+  scenario_id: "lambda-timeout-cold-start"
+  # R11 extension: sim-mode 필수 필드
+  sources_read:
+    - "evidence/metrics.yaml"
+    - "evidence/logs.yaml"
+    - "evidence/cli-outputs.yaml"
+  intended_commands:
+    - command: "aws cloudwatch get-metric-statistics --namespace AWS/Lambda --metric-name Duration --dimensions Name=FunctionName,Value=payment-processor --statistics p95 --period 300"
+      fixture_key: "metrics.lambda_duration_p95"
+    - command: "aws logs start-query --log-group-name /aws/lambda/payment-processor --query-string 'filter @message like /Init Duration/'"
+      fixture_key: "logs.init_duration_entries"
+    - command: "aws lambda get-function-configuration --function-name payment-processor"
+      fixture_key: "cli_outputs.get_function_configuration"
+  alarms:
+    - alarm_name: "Lambda-Duration-High"
+      state: "ALARM"
+      reason: "Duration p95 exceeded 29000ms (threshold: 3000ms)"
+  metrics_snapshot:
+    - metric_name: "Duration"
+      namespace: "AWS/Lambda"
+      value: 31200
+      unit: "Milliseconds"
+      period: "5min-p95"
+  recent_logs:
+    - log_group: "/aws/lambda/payment-processor"
+      query: "filter @message like /Init Duration/"
+      result_summary: "Init Duration: 8200ms (12 occurrences in last hour)"
+      sample_entries: ["REPORT RequestId: abc Init Duration: 8200.15 ms Duration: 31182.45 ms"]
+
+# ─── 입력: diagnosis.yaml (잘못된 root_cause — reasoning이 evidence와 불일치) ───
+diagnosis_yaml:
+  incident_id: "exam-lambda-timeout-001"
+  timestamp: "2026-04-05T16:03:00Z"
+  scenario_id: "lambda-timeout-cold-start"
+  decision_tree_trace:
+    - step: 1
+      question: "타임아웃이 일관적인가?"
+      check_command: "CloudWatch Duration p95 확인"
+      result: "p95=31200ms > timeout=3000ms"
+      branch_taken: "일관적 타임아웃"
+    - step: 2
+      question: "Init Duration이 높은가?"
+      check_command: "Lambda logs Init Duration 확인"
+      result: "Init Duration: 8200ms"
+      branch_taken: "Init Duration 높음 — cold start 의심"
+    - step: 3
+      question: "메모리가 충분한가?"
+      check_command: "get-function-configuration MemorySize 확인"
+      result: "MemorySize: 512MB"
+      branch_taken: "메모리 부족으로 판단 (오류)"
+  # 잘못된 root_cause — 실제로는 TIMEOUT-COLD-JAVA-NOSNAP이어야 함
+  root_cause_code: "TIMEOUT-MEMORY-INSUFFICIENT"
+  root_cause_name: "Lambda 메모리 부족으로 인한 타임아웃"
+  confidence: medium
+  evidence:
+    - type: "metric"
+      source: "CloudWatch Duration p95"
+      detail: "p95=31200ms, 메모리 512MB에서 처리 지연"
+  recommended_actions:
+    - order: 1
+      name: "Lambda 메모리 증설"
+      type: "configuration"
+      command: "aws lambda update-function-configuration --function-name payment-processor --memory-size 1024"
+      risk: "LOW"
+  risk_level: "LOW"
+
+# ─── DKR ground truth (채점 기준) ───
+dkr_ground_truth:
+  scenario_id: "lambda-timeout-cold-start"
+  correct_root_cause_code: "TIMEOUT-COLD-JAVA-NOSNAP"
+  correct_root_cause_name: "Java Lambda SnapStart 미활성화로 인한 Cold Start 타임아웃"
+  expected_intended_commands:
+    - "aws cloudwatch get-metric-statistics --namespace AWS/Lambda --metric-name Duration"
+    - "aws logs start-query --log-group-name /aws/lambda/payment-processor --query-string 'filter @message like /Init Duration/'"
+    - "aws lambda get-function-configuration --function-name payment-processor"
+  correct_recommended_actions:
+    - "Lambda SnapStart 활성화 (Java 11+ 런타임)"
+    - "Provisioned Concurrency 설정으로 cold start 완화"
+    - "패키지 크기 최적화"
+
+# ─── 기대 결과: Grader Phase 2.5가 생성해야 할 skill-chain-result ───
+expected:
+  chain_dimensions:
+    collection_fidelity:
+      min_score: 2
+      rationale: "intended_commands 3개 중 2개가 DKR 기대 명령어와 일치 (Duration + Init Duration 확인). get-function-configuration은 있으나 SnapStart 확인 명령어 누락."
+    reasoning_fidelity:
+      score: 0
+      rationale: "root_cause_code가 TIMEOUT-MEMORY-INSUFFICIENT로 완전히 다른 카테고리. DKR ground truth TIMEOUT-COLD-JAVA-NOSNAP과 불일치."
+    chain_coverage:
+      min_score: 2
+      rationale: "Phase 2A: observe.yaml + diagnosis.yaml 모두 존재하고 필수 필드 충족."
+    artifact_completeness:
+      min_score: 2
+      rationale: "sim-mode 필수 필드(sources_read, intended_commands) 포함. 주요 필드 충족."
+  agents_operating_mode: simulation
+  grading_evidence:
+    missing_sim_fields_error: null   # sources_read + intended_commands 모두 있음
+
+# ─── 검증 기준 ───
+validation:
+  - "skill-chain-result.chain_dimensions.collection_fidelity >= 2 (올바른 명령어 요청)"
+  - "skill-chain-result.chain_dimensions.reasoning_fidelity == 0 (완전히 다른 root_cause)"
+  - "두 차원이 독립적으로 채점됨 — collection이 높아도 reasoning은 0일 수 있음"
+  - "skill-chain-result.agents_operating_mode == simulation"
+  - "grading_evidence.missing_sim_fields_error == null (sim 필드 존재 검증)"
+  - "skill-chain-result.chain_dimensions.chain_coverage >= 2"

@@ -1,0 +1,75 @@
+schema: exam-question/v1
+
+question:
+  id: "exam-ecs-crash-loop-002"
+  version: "1.0.0"
+  type: multiple_response
+
+  dkr_mapping:
+    scenario_id: "ecs-crash-loop"
+    tested_sections: [symptoms, diagnosis, root_causes]
+    root_cause_codes: ["ECS-IMAGE-PULL", "ECS-SECRET-INIT"]
+
+  scenario:
+    context: "한 핀테크 회사가 ECS Fargate 위에 ledger-api 서비스를 배포 중이다. 빌드 파이프라인이 ECR에 새 이미지를 푸시하고 CodeDeploy가 새 태스크 정의를 서비스에 적용한다."
+    situation: "금번 배포 직후 ledger-api 태스크들이 '시작 단계에서' 즉시 중지된다. 이전 태스크 정의는 정상 작동했으며 애플리케이션 로그가 전혀 나타나지 않는다 (컨테이너가 시작조차 되지 않음)."
+    evidence:
+      - type: cli_output
+        source: "aws ecs describe-tasks (태스크 A)"
+        value: "stoppedReason: 'CannotPullContainerError: ... repository does not exist or may require ...'"
+      - type: cli_output
+        source: "aws ecs describe-tasks (태스크 B)"
+        value: "stoppedReason: 'ResourceInitializationError: unable to pull secrets or registry auth'"
+      - type: log
+        source: "CloudWatch Logs (애플리케이션)"
+        value: "이벤트 없음 (로그 그룹은 존재하나 스트림이 생성되지 않음)"
+    constraint: "배포 롤백 전 root cause를 식별해야 한다 — 단순 롤백은 다음 배포에서 동일 문제 반복 우려."
+
+  question_text: "두 가지 stoppedReason 패턴이 공존하는 이 상황의 주된 원인 후보 두 가지를 선택하시오."
+
+  options:
+    - key: A
+      text: "태스크 실행 역할(execution role)에 ECR 이미지 pull 권한 또는 Secrets Manager/SSM Parameter 접근 권한이 누락되었다."
+    - key: B
+      text: "새 이미지 태그가 ECR 저장소에 실제로 존재하지 않거나 잘못된 태그로 배포되었다."
+    - key: C
+      text: "애플리케이션 코드에서 OOM이 발생하여 컨테이너가 SIGKILL로 종료되고 있다."
+    - key: D
+      text: "ALB 헬스체크 엔드포인트가 응답하지 않아 대상 그룹에서 unhealthy 처리된다."
+    - key: E
+      text: "Route 53 health check가 실패하여 DNS 레코드가 제거되었다."
+
+  correct_answers: ["A", "B"]
+  answer_count: 2
+
+  grading:
+    difficulty: medium
+    scoring_dimensions:
+      - dimension: diagnosis_accuracy
+        weight: 0.45
+      - dimension: reasoning_quality
+        weight: 0.30
+      - dimension: procedure_compliance
+        weight: 0.25
+
+  provenance:
+    origin: "oh-my-aws-dkr-derived"
+    dkr_version: "decision-knowledge-record/v1"
+    created_date: "2026-04-05"
+    author: "oh-my-aws-exam-generator"
+
+  certification_alignment:
+    - exam: "DOP-C02"
+      domain: "Domain 5: Incident and Event Response"
+      task_statement: "Troubleshoot deployment issues"
+
+  distractor_analysis:
+    - key: C
+      trap_type: common_misconception
+      explanation: "OOM은 exitCode 137로 나타나며 컨테이너가 시작 이후 종료된다. 이 시나리오는 시작 전 실패."
+    - key: D
+      trap_type: plausible_but_wrong
+      explanation: "헬스체크 실패는 컨테이너가 정상 시작된 후 발생. 여기선 컨테이너가 시작조차 못 함."
+    - key: E
+      trap_type: out_of_scope
+      explanation: "Route 53 레벨은 ECS 태스크 stoppedReason과 무관."

@@ -1,0 +1,78 @@
+schema: exam-question/v1
+
+question:
+  id: "exam-rds-perf-001"
+  version: "1.0.0"
+  type: multiple_choice
+
+  dkr_mapping:
+    scenario_id: "rds-perf-degradation"
+    tested_sections: [symptoms, diagnosis, remediation]
+    root_cause_codes: ["RDS-SLOW-QUERY"]
+
+  scenario:
+    context: "SaaS ERP 서비스가 PostgreSQL 기반 Amazon RDS(db.r6g.xlarge)를 Single-AZ로 운영한다. Performance Insights가 활성화되어 있다."
+    situation: "최근 월말 결산 시점에 RDS CPU가 지속적으로 95% 이상을 유지하며 사용자 UI 응답 지연이 보고된다. DB 접속 수는 max_connections 대비 30% 수준으로 안정적이고 DiskQueueDepth도 정상 범위이다."
+    evidence:
+      - type: metric
+        source: "AWS/RDS CPUUtilization"
+        value: "Average 95-97% (지난 1시간)"
+      - type: metric
+        source: "AWS/RDS DatabaseConnections"
+        value: "Max 45 (max_connections=150)"
+      - type: metric
+        source: "AWS/RDS ReadLatency / WriteLatency"
+        value: "정상 범위 (< 10ms)"
+      - type: metric
+        source: "AWS/RDS DiskQueueDepth"
+        value: "Average 2 (정상)"
+    constraint: "즉시 비용을 크게 증가시키는 조치(인스턴스 클래스 업그레이드)는 최후 수단이어야 하며, 먼저 원인 분석이 필요하다."
+
+  question_text: "root cause 진단을 위해 가장 먼저 수행해야 할 조치는 무엇인가?"
+
+  options:
+    - key: A
+      text: "인스턴스 클래스를 db.r6g.xlarge에서 db.r6g.2xlarge로 즉시 업그레이드한다."
+    - key: B
+      text: "Performance Insights에서 db.load.avg 메트릭과 상위 Wait Events/SQL을 조회하여 CPU를 소비하는 쿼리를 식별한다."
+    - key: C
+      text: "gp3 스토리지의 IOPS를 증설한다."
+    - key: D
+      text: "RDS Proxy를 도입하여 커넥션 풀링을 적용한다."
+
+  correct_answers: ["B"]
+  answer_count: 1
+
+  grading:
+    difficulty: medium
+    scoring_dimensions:
+      - dimension: diagnosis_accuracy
+        weight: 0.40
+      - dimension: reasoning_quality
+        weight: 0.30
+      - dimension: procedure_compliance
+        weight: 0.20
+      - dimension: impact_awareness
+        weight: 0.10
+
+  provenance:
+    origin: "oh-my-aws-dkr-derived"
+    dkr_version: "decision-knowledge-record/v1"
+    created_date: "2026-04-05"
+    author: "oh-my-aws-exam-generator"
+
+  certification_alignment:
+    - exam: "SOA-C02"
+      domain: "Domain 6: Cost and Performance Optimization"
+      task_statement: "Task 6.2: Implement performance optimization strategies"
+
+  distractor_analysis:
+    - key: A
+      trap_type: common_misconception
+      explanation: "원인 미확인 상태의 업그레이드는 비용만 늘리고 비효율 쿼리가 원인이면 재발한다."
+    - key: C
+      trap_type: plausible_but_wrong
+      explanation: "DiskQueueDepth가 정상이고 Latency가 정상이므로 I/O 병목이 아니다."
+    - key: D
+      trap_type: plausible_but_wrong
+      explanation: "커넥션 수가 max_connections의 30%로 여유가 있어 커넥션 풀링 문제가 아니다."

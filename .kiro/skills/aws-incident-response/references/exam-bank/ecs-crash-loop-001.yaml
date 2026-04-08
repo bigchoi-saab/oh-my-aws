@@ -1,0 +1,73 @@
+schema: exam-question/v1
+
+question:
+  id: "exam-ecs-crash-loop-001"
+  version: "1.0.0"
+  type: multiple_choice
+
+  dkr_mapping:
+    scenario_id: "ecs-crash-loop"
+    tested_sections: [diagnosis, root_causes, remediation]
+    root_cause_codes: ["ECS-OOM"]
+
+  scenario:
+    context: "SaaS 분석 서비스가 ECS Fargate 위에서 report-generator 서비스(태스크 정의 memory=1024, cpu=512)를 운영한다. 이 태스크는 대용량 CSV 파일을 가공한다."
+    situation: "새 고객이 온보딩되어 report-generator가 평소보다 5배 큰 파일을 처리하기 시작한 이후, 태스크가 시작 직후 반복적으로 중지된다. 서비스의 RunningTaskCount가 desired count에 도달하지 못하고 있다."
+    evidence:
+      - type: cli_output
+        source: "aws ecs describe-tasks"
+        value: "stoppedReason: 'Essential container in task exited', containers[0].exitCode: 137"
+      - type: metric
+        source: "ECS/ContainerInsights RestartCount"
+        value: "RestartCount.Sum > 0, 지난 10분간 지속 증가"
+      - type: log
+        source: "ECS 서비스 이벤트"
+        value: "(service report-generator) has started 8 tasks: (task ...), 반복적으로 새 태스크 생성"
+    constraint: "대용량 파일 처리는 사업 핵심 기능이므로 중단할 수 없다."
+
+  question_text: "이 크래시 루프의 root cause와 가장 적절한 1차 조치는 무엇인가?"
+
+  options:
+    - key: A
+      text: "애플리케이션 런타임 에러(exitCode 1)로 판단되므로 이전 태스크 정의로 롤백한다."
+    - key: B
+      text: "OOM Kill(exitCode 137)로 판단되므로 태스크 메모리 한계를 증설한 새 태스크 정의를 등록하고 서비스에 적용한다."
+    - key: C
+      text: "ECR 이미지 Pull 실패로 판단되므로 태스크 실행 역할의 ECR 권한을 확인한다."
+    - key: D
+      text: "헬스체크 반복 실패로 판단되므로 ALB 대상 그룹의 unhealthy_threshold_count를 높인다."
+
+  correct_answers: ["B"]
+  answer_count: 1
+
+  grading:
+    difficulty: easy
+    scoring_dimensions:
+      - dimension: diagnosis_accuracy
+        weight: 0.50
+      - dimension: action_appropriateness
+        weight: 0.30
+      - dimension: reasoning_quality
+        weight: 0.20
+
+  provenance:
+    origin: "oh-my-aws-dkr-derived"
+    dkr_version: "decision-knowledge-record/v1"
+    created_date: "2026-04-05"
+    author: "oh-my-aws-exam-generator"
+
+  certification_alignment:
+    - exam: "SOA-C02"
+      domain: "Domain 1: Monitoring, Logging, and Remediation"
+      task_statement: "Task 1.3: Remediate based on monitoring and availability metrics"
+
+  distractor_analysis:
+    - key: A
+      trap_type: plausible_but_wrong
+      explanation: "exitCode 1이 아닌 137이므로 앱 에러가 아니다. 137은 SIGKILL(대부분 OOM)을 의미."
+    - key: C
+      trap_type: plausible_but_wrong
+      explanation: "이미지 Pull 실패 시 stoppedReason에 'CannotPullContainerError'가 나타난다. 이 경우는 컨테이너 시작 이후 종료."
+    - key: D
+      trap_type: common_misconception
+      explanation: "헬스체크 임계값 완화는 증상 은폐이며 OOM 원인을 해결하지 못한다."

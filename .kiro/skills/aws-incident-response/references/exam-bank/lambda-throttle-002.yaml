@@ -1,0 +1,80 @@
+schema: exam-question/v1
+
+question:
+  id: "exam-lambda-throttle-002"
+  version: "1.0.0"
+  type: multiple_response
+
+  dkr_mapping:
+    scenario_id: "lambda-throttle-concurrency-exhaustion"
+    tested_sections: [diagnosis, remediation, guardrails]
+    root_cause_codes: ["THROTTLE-SRC", "THROTTLE-BURST"]
+
+  scenario:
+    context: "한 IoT 플랫폼이 디바이스 이벤트를 SQS → Lambda 파이프라인으로 처리한다. order-events 큐에서 order-processor Lambda가 이벤트를 배치 처리한다."
+    situation: "프로모션 이벤트로 트래픽이 평상시 대비 10배로 급증했다. order-processor 함수에 Throttles가 발생하고 SQS ApproximateAgeOfOldestMessage가 증가하는 한편, 계정 전체 ConcurrentExecutions의 60% 수준만 사용 중이다."
+    evidence:
+      - type: metric
+        source: "AWS/Lambda Throttles"
+        value: "order-processor Throttles.Sum > 0"
+      - type: metric
+        source: "AWS/SQS ApproximateAgeOfOldestMessage"
+        value: "180초 → 900초로 증가"
+      - type: metric
+        source: "AWS/Lambda ConcurrentExecutions"
+        value: "계정 전체 ConcurrentExecutions / AccountLimit = 60%"
+      - type: cli_output
+        source: "aws lambda list-event-source-mappings"
+        value: "기본 설정 상태, MaximumConcurrency 미설정"
+    constraint: "비용 증가를 최소화하면서 큐 적체를 완화해야 한다."
+
+  question_text: "이 상황에서 즉시 완화 효과를 볼 수 있는 조치 두 가지를 선택하시오."
+
+  options:
+    - key: A
+      text: "SQS 이벤트 소스 매핑의 MaximumConcurrency를 명시적으로 설정하여 order-processor가 버스트 시에도 안정적으로 스케일하도록 한다."
+    - key: B
+      text: "order-processor 함수의 Reserved Concurrency를 계정 여유분 내에서 높여 해당 함수가 안정적으로 확보할 동시성을 보장한다."
+    - key: C
+      text: "함수 타임아웃을 3분에서 15분으로 늘려 배치 처리를 더 오래 수행하도록 한다."
+    - key: D
+      text: "SQS 큐를 삭제하고 이벤트를 DynamoDB Stream으로 전환한다."
+    - key: E
+      text: "Service Quotas로 계정 동시성 한도 증가를 요청한다 (활용률 60% 상태)."
+
+  correct_answers: ["A", "B"]
+  answer_count: 2
+
+  grading:
+    difficulty: medium
+    scoring_dimensions:
+      - dimension: diagnosis_accuracy
+        weight: 0.30
+      - dimension: action_appropriateness
+        weight: 0.30
+      - dimension: procedure_compliance
+        weight: 0.20
+      - dimension: impact_awareness
+        weight: 0.20
+
+  provenance:
+    origin: "oh-my-aws-dkr-derived"
+    dkr_version: "decision-knowledge-record/v1"
+    created_date: "2026-04-05"
+    author: "oh-my-aws-exam-generator"
+
+  certification_alignment:
+    - exam: "DOP-C02"
+      domain: "Domain 5: Incident and Event Response"
+      task_statement: "Troubleshoot issues and determine how to restore operations"
+
+  distractor_analysis:
+    - key: C
+      trap_type: common_misconception
+      explanation: "타임아웃 증가는 처리 속도가 아닌 처리 시간 한계만 늘린다. Throttling과 무관."
+    - key: D
+      trap_type: out_of_scope
+      explanation: "아키텍처 전면 교체는 비용/시간 측면에서 즉시 완화가 아니다."
+    - key: E
+      trap_type: plausible_but_wrong
+      explanation: "계정 활용률이 60%이므로 계정 한도는 병목이 아니다. 함수별 할당이 문제."

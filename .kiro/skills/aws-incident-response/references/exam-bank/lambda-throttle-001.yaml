@@ -1,0 +1,76 @@
+schema: exam-question/v1
+
+question:
+  id: "exam-lambda-throttle-001"
+  version: "1.0.0"
+  type: multiple_choice
+
+  dkr_mapping:
+    scenario_id: "lambda-throttle-concurrency-exhaustion"
+    tested_sections: [diagnosis, root_causes, remediation]
+    root_cause_codes: ["THROTTLE-RESV-ZERO"]
+
+  scenario:
+    context: "한 이커머스 회사가 결제 처리용 Lambda 함수 payment-processor를 운영한다. 이 함수는 사용자 결제 완료 시 API Gateway를 통해 동기 호출된다."
+    situation: "어제 오후 배포 이후 payment-processor 함수로의 모든 요청이 429 Throttling 에러로 실패하고 있다. 다른 Lambda 함수들은 정상 작동하며 계정 전체 ConcurrentExecutions는 여유가 많은 상황이다."
+    evidence:
+      - type: metric
+        source: "AWS/Lambda Throttles"
+        value: "payment-processor 함수만 Throttles.Sum > 0 (다른 함수는 모두 0)"
+      - type: cli_output
+        source: "aws lambda get-function-concurrency"
+        value: "ReservedConcurrentExecutions: 0"
+      - type: cli_output
+        source: "aws lambda get-account-settings"
+        value: "AccountLimit.ConcurrentExecutions: 1000, UnreservedConcurrentExecutions: 950"
+      - type: log
+        source: "API Gateway access log"
+        value: "모든 요청이 429 TooManyRequestsException"
+    constraint: "결제는 사업 핵심 기능이므로 최대한 빨리 복구해야 한다."
+
+  question_text: "root cause를 가장 정확히 식별하고 우선적으로 실행해야 할 조치는 무엇인가?"
+
+  options:
+    - key: A
+      text: "계정 동시성 한도 증가를 Service Quotas에 요청한다."
+    - key: B
+      text: "Reserved Concurrency가 0으로 설정된 것이 원인이므로 delete-function-concurrency로 0 설정을 해제한다."
+    - key: C
+      text: "Provisioned Concurrency를 10으로 설정하여 초기 실행 환경을 확보한다."
+    - key: D
+      text: "SQS 이벤트 소스를 추가하여 버스트 트래픽을 버퍼링한다."
+
+  correct_answers: ["B"]
+  answer_count: 1
+
+  grading:
+    difficulty: easy
+    scoring_dimensions:
+      - dimension: diagnosis_accuracy
+        weight: 0.50
+      - dimension: action_appropriateness
+        weight: 0.30
+      - dimension: reasoning_quality
+        weight: 0.20
+
+  provenance:
+    origin: "oh-my-aws-dkr-derived"
+    dkr_version: "decision-knowledge-record/v1"
+    created_date: "2026-04-05"
+    author: "oh-my-aws-exam-generator"
+
+  certification_alignment:
+    - exam: "SOA-C02"
+      domain: "Domain 1: Monitoring, Logging, and Remediation"
+      task_statement: "Task 1.3: Remediate based on monitoring and availability metrics"
+
+  distractor_analysis:
+    - key: A
+      trap_type: plausible_but_wrong
+      explanation: "증거에 따르면 계정 한도는 여유(950)가 있으므로 계정 한도 증가는 불필요하다."
+    - key: C
+      trap_type: plausible_but_wrong
+      explanation: "Reserved=0일 때는 PC 설정조차 적용되지 않는다. 먼저 0 설정을 해제해야 한다."
+    - key: D
+      trap_type: out_of_scope
+      explanation: "SQS 버퍼링은 버스트 시나리오용이며 이 상황은 설정 실수가 원인이다."
