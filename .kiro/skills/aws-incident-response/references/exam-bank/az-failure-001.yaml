@@ -1,0 +1,78 @@
+schema: exam-question/v1
+
+question:
+  id: "exam-az-failure-001"
+  version: "1.0.0"
+  type: multiple_choice
+
+  dkr_mapping:
+    scenario_id: "az-failure"
+    tested_sections: [symptoms, diagnosis, remediation, guardrails]
+    root_cause_codes: ["AZ-AWS-CONFIRMED"]
+
+  scenario:
+    context: "한 SaaS 회사가 us-east-1에 Multi-AZ(us-east-1a/1b/1c) ALB 뒤 ECS Fargate 서비스를 운영한다. 각 AZ에 4개씩 총 12개 태스크가 있다."
+    situation: "AWS Health Dashboard에 us-east-1a 가용영역 연결성 이벤트가 'open' 상태로 게시되었다. ALB Target Health가 us-east-1a AZ에서만 UnHealthyHostCount = 4로 증가했고, us-east-1b/1c는 정상이다. 사용자 일부가 5xx 에러를 받고 있다."
+    evidence:
+      - type: cli_output
+        source: "aws health describe-events"
+        value: "eventTypeCode: AWS_EC2_CONNECTIVITY_ISSUE, availabilityZone: us-east-1a, statusCode: open"
+      - type: metric
+        source: "AWS/ApplicationELB UnHealthyHostCount per AZ"
+        value: "us-east-1a: 4, us-east-1b: 0, us-east-1c: 0"
+      - type: cli_output
+        source: "aws elbv2 describe-load-balancers"
+        value: "AvailabilityZones: [us-east-1a, us-east-1b, us-east-1c]"
+      - type: metric
+        source: "ECS RunningTaskCount"
+        value: "8 (desired: 12) — us-east-1a의 4개 태스크가 비정상"
+    constraint: "사용자 영향을 최소화하며 가능한 빨리 트래픽을 us-east-1a에서 우회시켜야 한다. 조치 후 AWS Health가 해소되면 원복 가능해야 한다."
+
+  question_text: "이 상황에서 즉시 실행하기에 가장 적절하고 가역적인 조치는 무엇인가?"
+
+  options:
+    - key: A
+      text: "us-east-1a에 배포된 모든 ECS 태스크를 삭제하고 서비스 desired count를 12에서 8로 영구 감소시킨다."
+    - key: B
+      text: "ARC Zonal Shift를 실행하여 ALB에서 us-east-1a로의 트래픽을 일정 시간 동안 차단한다. 나머지 AZ 용량이 충분함을 사전 확인한다."
+    - key: C
+      text: "전체 서비스를 us-west-2 리전으로 페일오버하고 Route 53 레코드를 변경한다."
+    - key: D
+      text: "us-east-1a의 VPC 서브넷을 삭제하여 AZ를 완전히 격리한다."
+
+  correct_answers: ["B"]
+  answer_count: 1
+
+  grading:
+    difficulty: medium
+    scoring_dimensions:
+      - dimension: diagnosis_accuracy
+        weight: 0.25
+      - dimension: action_appropriateness
+        weight: 0.30
+      - dimension: procedure_compliance
+        weight: 0.20
+      - dimension: impact_awareness
+        weight: 0.25
+
+  provenance:
+    origin: "oh-my-aws-dkr-derived"
+    dkr_version: "decision-knowledge-record/v1"
+    created_date: "2026-04-05"
+    author: "oh-my-aws-exam-generator"
+
+  certification_alignment:
+    - exam: "SAP-C02"
+      domain: "Domain 2: Design for New Solutions"
+      task_statement: "Design resilient multi-AZ architectures with ARC Zonal Shift"
+
+  distractor_analysis:
+    - key: A
+      trap_type: plausible_but_wrong
+      explanation: "태스크 삭제와 desired count 영구 감소는 비가역적이며 AZ 복구 후 원상 복귀가 어렵다."
+    - key: C
+      trap_type: out_of_scope
+      explanation: "단일 AZ 이벤트에 대해 리전 페일오버는 과잉 대응이며 RTO/RPO 측면에서 불리하다."
+    - key: D
+      trap_type: common_misconception
+      explanation: "VPC 서브넷 삭제는 비가역적이며 대부분 차단되어 있다 (HIGH risk, guardrails 위반)."

@@ -1,0 +1,144 @@
+schema: exam-bank-index/v1
+version: "1.0.0"
+
+# ═══════════════════════════════════════════════════════════════
+# AWS Exam Bank Index — oh-my-aws 자율학습 파이프라인 문제 인덱스
+# ═══════════════════════════════════════════════════════════════
+# 용도: 시험 문제 전체 목록, 통계, 라우팅 정보 제공
+# 참조: .omc/plans/aws-exam-self-learning-pipeline.md § 단계 1.2
+# 스키마: .claude/skills/aws-incident-response/references/exam-schema.yaml
+# ═══════════════════════════════════════════════════════════════
+
+total_questions: 10
+
+coverage:
+  categories:
+    compute: 5          # lambda (3) + ecs (2)
+    database: 2         # dynamodb (1) + rds (1)
+    platform: 1         # az-failure
+    deployment: 1       # post-deploy-5xx
+    security: 1         # iam-compromise
+
+  types:
+    multiple_choice: 7
+    multiple_response: 3
+
+  difficulty:
+    easy: 3             # lambda-throttle-001, ecs-crash-loop-001, post-deploy-5xx-001
+    medium: 6           # lambda-timeout-001, lambda-throttle-002, ecs-crash-loop-002, rds-perf-001, az-failure-001, iam-compromise-001
+    hard: 1             # dynamodb-throttle-001
+
+  certifications:
+    SOA-C02: 6          # lambda-timeout, lambda-throttle-001, ecs-crash-loop-001, rds-perf, iam-compromise
+    DOP-C02: 5          # lambda-timeout, lambda-throttle-002, ecs-crash-loop-002, post-deploy-5xx, iam-compromise
+    SAA-C03: 1          # dynamodb-throttle
+    SAP-C02: 2          # dynamodb-throttle, az-failure
+
+  scoring_dimensions_covered:
+    diagnosis_accuracy: 8
+    action_appropriateness: 9
+    reasoning_quality: 8
+    procedure_compliance: 6
+    impact_awareness: 7
+
+questions:
+  - id: exam-lambda-timeout-001
+    file: lambda-timeout-001.yaml
+    scenario_id: lambda-timeout-cold-start
+    category: compute
+    type: multiple_choice
+    difficulty: medium
+    tested_root_causes: [TIMEOUT-COLD-JAVA-NOSNAP]
+    summary: "Java Lambda 콜드 스타트 타임아웃 — SnapStart 활성화 판단"
+
+  - id: exam-lambda-throttle-001
+    file: lambda-throttle-001.yaml
+    scenario_id: lambda-throttle-concurrency-exhaustion
+    category: compute
+    type: multiple_choice
+    difficulty: easy
+    tested_root_causes: [THROTTLE-RESV-ZERO]
+    summary: "Lambda Reserved Concurrency=0 설정 실수 진단"
+
+  - id: exam-lambda-throttle-002
+    file: lambda-throttle-002.yaml
+    scenario_id: lambda-throttle-concurrency-exhaustion
+    category: compute
+    type: multiple_response
+    difficulty: medium
+    tested_root_causes: [THROTTLE-SRC, THROTTLE-BURST]
+    summary: "SQS+Lambda 버스트 트래픽 완화 조치 선택"
+
+  - id: exam-ecs-crash-loop-001
+    file: ecs-crash-loop-001.yaml
+    scenario_id: ecs-crash-loop
+    category: compute
+    type: multiple_choice
+    difficulty: easy
+    tested_root_causes: [ECS-OOM]
+    summary: "ECS Fargate 태스크 exitCode 137 OOM 진단"
+
+  - id: exam-ecs-crash-loop-002
+    file: ecs-crash-loop-002.yaml
+    scenario_id: ecs-crash-loop
+    category: compute
+    type: multiple_response
+    difficulty: medium
+    tested_root_causes: [ECS-IMAGE-PULL, ECS-SECRET-INIT]
+    summary: "ECS 태스크 시작 실패 — 이미지/시크릿 초기화 원인 식별"
+
+  - id: exam-dynamodb-throttle-001
+    file: dynamodb-throttle-001.yaml
+    scenario_id: dynamodb-throttle
+    category: database
+    type: multiple_choice
+    difficulty: hard
+    tested_root_causes: [DDB-HOT-PARTITION]
+    summary: "DynamoDB 핫 파티션 vs 전체 용량 부족 구분 및 완화"
+
+  - id: exam-rds-perf-001
+    file: rds-perf-001.yaml
+    scenario_id: rds-perf-degradation
+    category: database
+    type: multiple_choice
+    difficulty: medium
+    tested_root_causes: [RDS-SLOW-QUERY]
+    summary: "RDS CPU 95% 상황의 진단 순서 (Performance Insights 우선)"
+
+  - id: exam-az-failure-001
+    file: az-failure-001.yaml
+    scenario_id: az-failure
+    category: platform
+    type: multiple_choice
+    difficulty: medium
+    tested_root_causes: [AZ-AWS-CONFIRMED]
+    summary: "AZ 장애 시 ARC Zonal Shift 가역적 완화 판단"
+
+  - id: exam-post-deploy-5xx-001
+    file: post-deploy-5xx-001.yaml
+    scenario_id: post-deploy-5xx
+    category: deployment
+    type: multiple_choice
+    difficulty: easy
+    tested_root_causes: [DEPLOY-REGRESSION]
+    summary: "배포 직후 5xx 급증 — mitigation-first 롤백 판단"
+
+  - id: exam-iam-compromise-001
+    file: iam-compromise-001.yaml
+    scenario_id: iam-compromise
+    category: security
+    type: multiple_response
+    difficulty: medium
+    tested_root_causes: [IAM-KEY]
+    summary: "IAM 액세스 키 유출 — 즉시 대응 조치 선택"
+
+# ═══════════════════════════════════════════════════════════════
+# Generation Rules (향후 문제 추가 시 준수)
+# ═══════════════════════════════════════════════════════════════
+# 1. 파일명 패턴: {scenario-id-prefix}-{seq}.yaml (3자리 시퀀스)
+# 2. 각 문제는 하나의 DKR 시나리오에서 파생하며 dkr_mapping.scenario_id로 연결
+# 3. 복수 문제 시 tested_root_causes를 달리하여 다양한 분기 커버
+# 4. provenance.origin == "oh-my-aws-dkr-derived" (고정)
+# 5. scenario 본문은 DKR-blind 응답이 가능하도록 자체 완결적
+# 6. options는 DKR remediation 텍스트를 paraphrase (직접 복사 금지)
+# ═══════════════════════════════════════════════════════════════

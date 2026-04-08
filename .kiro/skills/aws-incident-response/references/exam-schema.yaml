@@ -1,0 +1,96 @@
+schema: exam-question/v1
+
+# ═══════════════════════════════════════════════════════════════
+# exam-question/v1 — AWS 인증시험 스타일 문제 스키마
+# ═══════════════════════════════════════════════════════════════
+# 용도: oh-my-aws DKR에서 역변환한 장애 시나리오 기반 시험 문제 정의
+# 원칙:
+#   - DKR의 symptoms/diagnosis/remediation을 역으로 질문화
+#   - AWS 공식 시험 문제 복사 금지, 100% 원본 생성
+#   - DKR-blind 응답이 가능하도록 scenario 본문은 자체 완결적
+#   - 채점 시 Grader는 DKR을 ground truth로 참조 (Hybrid Path, ADR-2)
+#
+# 참조: .omc/plans/aws-exam-self-learning-pipeline.md § 단계 1
+# ═══════════════════════════════════════════════════════════════
+
+question:
+  # ─── Core Fields (필수) ───
+
+  id: string                    # "exam-{scenario_id}-{seq}" (예: exam-lambda-throttle-001)
+  version: string               # "1.0.0"
+  type: enum                    # multiple_choice | multiple_response
+
+  dkr_mapping:                  # DKR 연결 (채점 시 ground truth 역추적)
+    scenario_id: string         # DKR 시나리오 ID (예: lambda-throttle-concurrency-exhaustion)
+    tested_sections: array      # DKR 내 테스트 대상 섹션
+                                #   허용값: [symptoms, diagnosis, root_causes, remediation, guardrails, verification]
+    root_cause_codes: array     # 관련 root cause 코드 배열 (예: [THROTTLE-ACCT, THROTTLE-RESV])
+
+  scenario:                     # 문제 본문 (증상/메트릭/증거만 제시, DKR 접근 없이 답변 가능해야 함)
+    context: string             # 시나리오 배경 (회사/환경 설명, 2-4 문장)
+    situation: string           # 현재 장애 상황 설명 (2-4 문장)
+    evidence: array             # 제공되는 증거 (메트릭/로그/알람)
+                                #   각 항목: {type: metric|log|alarm|cli_output, source: string, value: string}
+    constraint: string          # 제약 조건 (시간/비용/규모/가용성 등)
+
+  question_text: string         # 실제 질문 (1 문장)
+
+  options:                      # 선택지 (multiple_choice: 4개, multiple_response: 5-6개)
+    - key: string               # A, B, C, D, E, F
+      text: string              # 선택지 텍스트 (1-3 문장)
+
+  correct_answers: array        # 정답 키 배열 (예: [A] 또는 [A, C])
+  answer_count: integer         # 선택해야 하는 답 수 (multiple_choice=1, multiple_response>=2)
+
+  grading:
+    difficulty: enum            # easy | medium | hard
+    scoring_dimensions:         # 이 문제가 측정하는 채점 차원 (최소 1개, 최대 5개)
+      - dimension: string       # diagnosis_accuracy | action_appropriateness | reasoning_quality
+                                # procedure_compliance | impact_awareness
+        weight: float           # 0.0-1.0 (이 문제 내에서의 상대 가중치)
+
+  provenance:                   # 출처/저작권 (저작권 안전 보장)
+    origin: string              # "oh-my-aws-dkr-derived" (고정값)
+    dkr_version: string         # 원본 DKR 버전 (예: "decision-knowledge-record/v1")
+    created_date: string        # ISO8601 (YYYY-MM-DD)
+    author: string              # "oh-my-aws-exam-generator" 또는 사람 이름
+
+  # ─── Optional Fields (향후 추가 가능, 초기 생성 시 생략 허용) ───
+
+  certification_alignment:      # 참고한 AWS 인증 시험 도메인 (선택)
+    - exam: string              # SOA-C02 | DOP-C02 | SAA-C03 | SAP-C02
+      domain: string            # 도메인 번호/이름 (예: "Domain 1: Monitoring, Logging, and Remediation")
+      task_statement: string    # 태스크 설명 (예: "Task 1.1: Implement metrics, alarms, and filters")
+
+  distractor_analysis:          # 오답 분석 (선택 — 채점 시 runtime 유도 가능)
+    - key: string               # 오답 키 (A/B/C/D)
+      trap_type: string         # plausible_but_wrong | partially_correct | common_misconception | out_of_scope
+      explanation: string       # 왜 이것이 오답인지 (채점 시 피드백에 사용)
+
+  aws_metadata:                 # AWS 서비스 메타데이터 (선택 — scenario + dkr_mapping에서 유도 가능)
+    primary_service: string     # 주요 AWS 서비스 (예: "Lambda")
+    related_services: array     # 관련 AWS 서비스 (예: ["SQS", "CloudWatch"])
+    aws_doc_refs: array         # 참고 AWS 공식 문서 URL (DKR의 source_refs와 일치 또는 서브셋)
+
+
+# ═══════════════════════════════════════════════════════════════
+# Scoring Dimensions 정의 (grading-rubric.yaml과 동기화)
+# ═══════════════════════════════════════════════════════════════
+# - diagnosis_accuracy       (진단 정확도)     기본 가중치 0.30
+# - action_appropriateness   (행동 적절성)     기본 가중치 0.25
+# - reasoning_quality        (추론 품질)       기본 가중치 0.20
+# - procedure_compliance     (절차 준수)       기본 가중치 0.15
+# - impact_awareness         (영향 범위 인식)  기본 가중치 0.10
+# ═══════════════════════════════════════════════════════════════
+
+# ═══════════════════════════════════════════════════════════════
+# Validation Rules (생성 시 준수 필수)
+# ═══════════════════════════════════════════════════════════════
+# 1. Core Fields 12개 모두 존재해야 함
+# 2. type == multiple_choice → options 4개, correct_answers 1개, answer_count = 1
+# 3. type == multiple_response → options 5-6개, correct_answers 2-3개, answer_count = correct_answers.length
+# 4. dkr_mapping.scenario_id는 scenarios/ 디렉토리에 실제 존재해야 함
+# 5. provenance.origin == "oh-my-aws-dkr-derived"
+# 6. scenario 본문에 DKR 내부 용어(root_cause code 등)를 직접 노출하지 않음 (DKR-blind 원칙)
+# 7. options 텍스트에서 DKR의 remediation.actions.name을 그대로 복사하지 않음 (paraphrase 필수)
+# ═══════════════════════════════════════════════════════════════

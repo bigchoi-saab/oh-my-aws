@@ -1,0 +1,76 @@
+schema: exam-question/v1
+
+question:
+  id: "exam-lambda-timeout-001"
+  version: "1.0.0"
+  type: multiple_choice
+
+  dkr_mapping:
+    scenario_id: "lambda-timeout-cold-start"
+    tested_sections: [symptoms, diagnosis, remediation]
+    root_cause_codes: ["TIMEOUT-COLD-JAVA-NOSNAP"]
+
+  scenario:
+    context: "한 금융 회사가 Spring Boot 기반 Java 17 Lambda 함수를 API Gateway 뒤에 배포하여 잔액 조회 API를 제공한다. 함수 타임아웃은 30초로 설정되어 있다."
+    situation: "최근 사용자 트래픽이 새벽 시간대에 거의 없다가 오전 업무 시작 시 급증한다. 오전 9시 전후로 일부 호출이 'Task timed out after 30.00 seconds' 메시지와 함께 실패하고 있다. 낮 시간대에 함수가 warm 상태일 때는 정상 응답한다."
+    evidence:
+      - type: metric
+        source: "CloudWatch Logs REPORT"
+        value: "Init Duration: 8,200 ms (최대값), Duration: 3,100 ms (평균)"
+      - type: metric
+        source: "AWS/Lambda Duration p95"
+        value: "warm 호출: 3.2s / first-invocation: 31s+ (timeout)"
+      - type: log
+        source: "Lambda 로그"
+        value: "@message like 'Status: timeout' — 1시간 내 12건 발생, 모두 idle 후 첫 호출"
+    constraint: "운영 비용 증가는 최소화해야 하며, 애플리케이션 코드 재작성 없이 단기간에 해결해야 한다."
+
+  question_text: "이 상황에서 가장 우선적으로 적용해야 하는 조치는 무엇인가?"
+
+  options:
+    - key: A
+      text: "함수 타임아웃을 30초에서 60초로 늘린다."
+    - key: B
+      text: "Lambda 함수에 SnapStart를 활성화하고, 버전을 게시한 뒤 alias가 새 버전을 가리키도록 한다."
+    - key: C
+      text: "Provisioned Concurrency를 5개 설정하여 warm 상태를 유지한다."
+    - key: D
+      text: "API Gateway 타임아웃 제한을 늘리고 재시도 정책을 추가한다."
+
+  correct_answers: ["B"]
+  answer_count: 1
+
+  grading:
+    difficulty: medium
+    scoring_dimensions:
+      - dimension: diagnosis_accuracy
+        weight: 0.40
+      - dimension: action_appropriateness
+        weight: 0.30
+      - dimension: impact_awareness
+        weight: 0.30
+
+  provenance:
+    origin: "oh-my-aws-dkr-derived"
+    dkr_version: "decision-knowledge-record/v1"
+    created_date: "2026-04-05"
+    author: "oh-my-aws-exam-generator"
+
+  certification_alignment:
+    - exam: "SOA-C02"
+      domain: "Domain 6: Cost and Performance Optimization"
+      task_statement: "Task 6.2: Implement performance optimization strategies"
+    - exam: "DOP-C02"
+      domain: "Domain 4: Monitoring and Logging"
+      task_statement: "Identify serverless cold-start performance issues"
+
+  distractor_analysis:
+    - key: A
+      trap_type: common_misconception
+      explanation: "타임아웃 증가는 증상을 가릴 뿐 원인(긴 Init Duration)을 해결하지 못하며 SLA는 여전히 위반된다."
+    - key: C
+      trap_type: partially_correct
+      explanation: "PC는 작동하지만 비용이 지속 발생한다. Java 런타임에서는 무료인 SnapStart가 동일 효과를 낸다."
+    - key: D
+      trap_type: out_of_scope
+      explanation: "API Gateway 레벨 조치는 root cause인 콜드 스타트와 무관하다."

@@ -1,0 +1,85 @@
+schema: grader-test-case/v1
+
+# ═══════════════════════════════════════════════════════════════
+# Grader Test Case #3: 완전 오답 응답
+# ═══════════════════════════════════════════════════════════════
+# 목적: Grader가 DKR과 무관한 잘못된 답에 대해 낮은 점수 + knowledge_gap 분류를 하는지 검증
+# 참조 문제: exam-dynamodb-throttle-001 (DynamoDB 핫 파티션)
+# 참조 DKR: dynamodb-throttle
+# 기대 결과: exact_match false, total_weighted_score < 0.4, failure_type = knowledge_gap
+# ═══════════════════════════════════════════════════════════════
+
+test_id: "grader-test-wrong"
+description: "완전 오답 — 존재하지 않는 AWS 기능을 언급하고 DKR root_cause와 무관한 원인 제시 (knowledge_gap)"
+
+# ─── 입력: question (subset) ───
+question:
+  id: "exam-dynamodb-throttle-001"
+  type: multiple_choice
+  dkr_mapping:
+    scenario_id: "dynamodb-throttle"
+    root_cause_codes: ["DDB-HOT-PARTITION"]
+  correct_answers: ["B"]
+  answer_count: 1
+  grading:
+    difficulty: hard
+    scoring_dimensions:
+      - dimension: diagnosis_accuracy
+        weight: 0.35
+      - dimension: action_appropriateness
+        weight: 0.25
+      - dimension: reasoning_quality
+        weight: 0.20
+      - dimension: impact_awareness
+        weight: 0.20
+
+# ─── 입력: submission (subset) ───
+submission:
+  run_id: "run-2026-04-05T10-00"
+  question_id: "exam-dynamodb-throttle-001"
+  scenario_id: "dynamodb-throttle"
+  selected_answers: ["D"]            # D: GSI 생성 (오답, 쓰기 부하 오히려 증가)
+  reasoning: |
+    DynamoDB 쓰로틀이 발생했으므로 DynamoDB Cache Layer(존재하지 않는 기능)를 활성화해
+    읽기 부하를 분산시키면 된다. GSI를 생성하여 읽기를 다른 인덱스로 보내는 것도 효과적이다.
+    DynamoDB Auto-Sharding 기능을 활성화하면 파티션 문제도 자동 해결된다.
+    (주의: DynamoDB Cache Layer와 Auto-Sharding은 AWS에 존재하지 않는 기능이다.)
+  decision_trace:
+    - step: 1
+      observation: "쓰로틀 발생 = 읽기 부하 과다"
+      hypothesis: "캐시로 해결"
+      eliminated_options: []
+  dkr_access_log:
+    dkr_files_read: false
+    allowed_references: ["exam-bank/dynamodb-throttle-001.yaml"]
+  timestamp: "2026-04-05T10:15:00Z"
+
+# ─── 기대 결과 ───
+expected:
+  exact_match:
+    correct: false
+    expected: ["B"]
+    actual: ["D"]
+  total_weighted_score_max: 0.40     # < 0.40 요구
+  dimension_scores_expectations:
+    - dimension_id: diagnosis_accuracy
+      max_score: 1                   # 핫 파티션 진단 실패
+    - dimension_id: action_appropriateness
+      max_score: 1                   # GSI는 쓰기 부하 증가 (DKR과 반대)
+    - dimension_id: reasoning_quality
+      max_score: 1                   # decision_trace 1단계만 존재
+  failure_analysis:
+    has_failure: true
+    expected_primary_failure: "knowledge_gap"
+    expected_indicators_matched:
+      - "존재하지 않는 AWS 기능 언급 (DynamoDB Cache Layer, Auto-Sharding)"
+      - "DKR root cause 코드와 무관한 원인 제시"
+
+# ─── 검증 기준 ───
+validation:
+  - "Grader 출력의 exam-result.exact_match.correct == false"
+  - "exam-result.total_weighted_score < 0.40"
+  - "exam-result.failure_analysis.has_failure == true"
+  - "exam-result.failure_analysis.primary_failure == 'knowledge_gap'"
+  - "improvement_suggestions에 DKR root_causes 보강 또는 source_ref 강화 항목 포함"
+  - "priority가 medium 이상 (knowledge_gap 기본값)"

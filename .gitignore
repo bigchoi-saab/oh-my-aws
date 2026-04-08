@@ -25,3 +25,11 @@ node_modules/
 # Environment
 .env
 .env.local
+
+# Runtime - agent/tool execution state
+# (Pre-existing tracked files under these paths remain tracked;
+#  these rules prevent future accidental commits of runtime state.)
+.omc/state/
+.omx/state/
+.omx/logs/
+.omx/artifacts/
