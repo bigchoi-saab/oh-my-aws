@@ -23,7 +23,7 @@ If you decide not to run the live incident at all, the fallback per Executor Han
 - [ ] **Sandbox account**, not production. The scenarios in §3 are low blast-radius, but this guide assumes isolation.
 - [ ] **Region confirmed** — export `AWS_REGION` and `AWS_PROFILE` in your shell before running the incident.
 - [ ] **`.ops/incidents/` directory writable** — the team-leader pipeline will create subdirectories here automatically; verify the path exists under `C:/dev/oh-my-aws/.ops/incidents/` (create it manually if missing).
-- [ ] **aws-team-leader skill and aws-incident-response skill** are both present at `.claude/skills/` — they are the orchestrator and domain-knowledge skills the pipeline needs.
+- [ ] **aws-team-leader skill and aws-incident-response skill** are both present at `.kiro/skills/` — they are the orchestrator and domain-knowledge skills the pipeline needs.
 
 ---
 
@@ -59,23 +59,23 @@ Scenarios involving `iam-compromise`, `region-outage`, `cascade-failure`, `az-fa
 
 ## 4. Run the incident through aws-team-leader
 
-Invoke the team-leader pipeline with an incident description that matches your scenario. The team-leader will route to the appropriate DKR entry in `aws-incident-response` and dispatch the Diagnostician → Executor → Reporter chain.
+Invoke the Kiro-side team-leader flow with an incident description that matches your scenario. The team-leader routes to the appropriate DKR entry in `aws-incident-response` and may use the `aws-incident-responder` quick path or the `aws-diagnostician -> aws-executor -> aws-reporter` chain when the full pipeline is needed.
 
 ### 4a. Trigger the pipeline
 
-Open Claude Code in `C:/dev/oh-my-aws/` and invoke the `/aws-incident` slash command — it is the canonical entry point for the aws-team-leader incident pipeline. Pass a scenario description that matches the DKR routing table in `aws-incident-response/SKILL.md` §9. Example invocations:
+Open Kiro CLI in `C:/dev/oh-my-aws/` and describe the incident in plain language so the `aws-team-leader` skill can classify it. Example prompts:
 
-```
-/aws-incident Lambda 함수 throttle 발생. CloudWatch Throttles 메트릭 급증. 대응 부탁.
+```text
+Lambda 함수 throttle 발생. CloudWatch Throttles 메트릭 급증. aws-team-leader workflow로 triage해줘.
 ```
 
 or
 
-```
-/aws-incident DynamoDB 테이블 ProvisionedThroughputExceededException 에러 다발. 대응 부탁.
+```text
+DynamoDB 테이블 ProvisionedThroughputExceededException 에러 다발. aws-team-leader workflow로 대응해줘.
 ```
 
-The `/aws-incident` command delegates to `aws-team-leader`, which runs the full `scenario-detect → diagnose → remediate → verify → audit` pipeline through the Diagnostician, Executor, and Reporter agents. **Let it run all 5 phases end-to-end.** Do not interrupt. When it asks for approval on a remediation step, approve it (or decline — either path produces the artifacts US-0 needs; approval just adds `execution.yaml` richness).
+The Kiro workflow should run the full `scenario-detect -> diagnose -> remediate -> verify -> audit` pipeline and write artifacts under `.ops/incidents/...`. **Let it run end-to-end.** Do not interrupt. When it asks for approval on a remediation step, approve it or decline it explicitly.
 
 **Important — this is live mode, not simulation.** The diagnostician will make real AWS API calls (`describe-*`, `get-metric-data`, `filter-log-events`, `lookup-events`, etc.) against your sandbox account. The executor may execute real remediation commands if you approve. Keep your sandbox account isolated.
 
@@ -129,7 +129,7 @@ captured_at: "2026-04-05T16:30:00Z"
 captured_by: user-live-incident
 source_incident_dir: ".ops/incidents/2026-04-05T16-30-lambda-throttle/"
 scenario_id: "lambda-throttle-concurrency-exhaustion"
-dkr_yaml: ".claude/skills/aws-incident-response/references/scenarios/lambda-throttle.yaml"
+dkr_yaml: ".kiro/skills/aws-incident-response/references/scenarios/lambda-throttle.yaml"
 agents_operating_mode: "live"
 notes: |
   Live-mode baseline capture for Phase 2A US-0 parity test.
@@ -155,7 +155,7 @@ Both fields must be present and non-empty. These are the fields US-2 AC#9 will r
 
 ## 7. You are done
 
-Tell the executor (or say in Claude Code): **"Live-incident baseline captured at `.ops/incidents/_parity-baseline/`. US-0 can proceed."**
+Tell the executor: **"Live-incident baseline captured at `.ops/incidents/_parity-baseline/`. US-0 can proceed."**
 
 The executor will then run US-0, which replays your chosen scenario through the fixture harness in simulation mode and computes similarity against the baseline. If parity is below threshold, US-0 surfaces it for debugging before Phase 2A proceeds.
 
@@ -190,7 +190,7 @@ This is a supported fallback path but it partially undoes the iteration-2 measur
 ## 10. References
 
 - Plan: `.omc/plans/aws-exam-skill-chain-v2.md` — see Executive Summary pre-kickoff block, US-0 acceptance criteria, Section 13 Handoff Note #1
-- Team-leader SKILL: `.claude/skills/aws-team-leader/SKILL.md`
-- Team-leader triage protocol: `.claude/skills/aws-team-leader/references/triage-protocol.md` (defines the `.ops/incidents/{id}/` directory convention)
-- DKR routing table: `.claude/skills/aws-incident-response/SKILL.md` §9
-- Handoff schemas: `.claude/skills/aws-team-leader/references/handoff-schemas.yaml` (defines `observe.yaml` schema — look for R11 extensions `sources_read` and `intended_commands`)
+- Team-leader SKILL: `.kiro/skills/aws-team-leader/SKILL.md`
+- Team-leader triage protocol: `.kiro/skills/aws-team-leader/references/triage-protocol.md` (defines the `.ops/incidents/{id}/` directory convention)
+- DKR routing table: `.kiro/skills/aws-incident-response/SKILL.md` §9
+- Handoff schemas: `.kiro/skills/aws-team-leader/references/handoff-schemas.yaml` (defines `observe.yaml` schema — look for R11 extensions `sources_read` and `intended_commands`)

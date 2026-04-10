@@ -18,10 +18,10 @@ This runbook documents the preconditions, execution steps, pass criteria, and fa
 
 **The user must complete the live-incident bootstrap guide before running US-0.**
 
-Guide location: `.claude/skills/aws-exam/references/live-incident-bootstrap-guide.md`
+Guide location: `.kiro/skills/aws-exam/references/live-incident-bootstrap-guide.md`
 
 That guide instructs the user to:
-1. Execute one real `/aws-incident` in live mode (real or staging AWS environment).
+1. Execute one real aws-team-leader incident flow in live mode (real or staging AWS environment).
 2. Copy the resulting incident artifacts into `.ops/incidents/_parity-baseline/`.
 
 **Required files in `.ops/incidents/_parity-baseline/`:**
@@ -58,13 +58,13 @@ The harness (US-1) must generate a sim-incident fixture from the `_us0-parity-fi
 ### Step 3: Run the parity check
 
 ```bash
-python .claude/skills/aws-exam/scripts/run_us0_parity.py
+python .kiro/skills/aws-exam/scripts/run_us0_parity.py
 ```
 
 Optional: specify custom paths:
 
 ```bash
-python .claude/skills/aws-exam/scripts/run_us0_parity.py \
+python .kiro/skills/aws-exam/scripts/run_us0_parity.py \
   --baseline-dir .ops/incidents/_parity-baseline \
   --fixture-diagnosis .ops/exam-results/_us0-fixture-run/sim-incidents/_us0-parity-fixture/diagnosis.yaml \
   --report-out .ops/exam-results/_parity-test-$(date -u +%Y-%m-%dT%H-%M-%S).yaml
@@ -125,10 +125,10 @@ If the mismatch is structural (e.g., sparse fixtures fundamentally cannot reprod
 |------|------|
 | `.ops/incidents/_parity-baseline/observe.yaml` | Real live-mode observation (user provides) |
 | `.ops/incidents/_parity-baseline/diagnosis.yaml` | Real live-mode diagnosis (user provides) |
-| `.claude/skills/aws-incident-response/references/exam-bank/_us0-parity-fixture.yaml` | Fixture question (NOT in _index.yaml) |
+| `.kiro/skills/aws-incident-response/references/exam-bank/_us0-parity-fixture.yaml` | Fixture question (NOT in _index.yaml) |
 | `.ops/exam-results/_us0-fixture-run/sim-incidents/_us0-parity-fixture/diagnosis.yaml` | Sim-mode diagnosis (harness generates) |
-| `.claude/skills/aws-exam/scripts/run_us0_parity.py` | This runbook's runner |
-| `.claude/skills/aws-exam/scripts/parity_check.py` | Core diff logic (US-13) |
+| `.kiro/skills/aws-exam/scripts/run_us0_parity.py` | This runbook's runner |
+| `.kiro/skills/aws-exam/scripts/parity_check.py` | Core diff logic (US-13) |
 | `.ops/exam-results/_parity-test-{timestamp}.yaml` | Structured report output |
 
 ---

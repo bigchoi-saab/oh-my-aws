@@ -2,9 +2,9 @@
 harness.py — Core evidence-injection harness for aws-exam simulation mode (US-1)
 
 Usage (CLI smoke-test):
-    cd .claude/skills/aws-exam
+    cd .kiro/skills/aws-exam
     python -m harness.harness \\
-        --question .claude/skills/aws-incident-response/references/exam-bank/lambda-timeout-001.yaml \\
+        --question .kiro/skills/aws-incident-response/references/exam-bank/lambda-timeout-001.yaml \\
         --run-id smoke-test \\
         --ops-root .ops/exam-results
 
@@ -15,7 +15,7 @@ Programmatic usage:
     preamble = h.get_agent_preamble(sim_dir)
 
 Design constraints:
-- NEVER reads .claude/skills/aws-incident-response/references/scenarios/*.yaml (US-1 AC#6)
+- NEVER reads .kiro/skills/aws-incident-response/references/scenarios/*.yaml (US-1 AC#6)
 - Idempotent: second run for same qid+run_id overwrites identically (US-1 AC#8)
 - All fixture files carry provenance footer (US-1 AC#7)
 - _dkr_access_log.yaml pre-written with violated=false BEFORE any agent spawn (US-11 AC#2)
@@ -42,7 +42,7 @@ from harness.sim_incident_writer import (
 # DKR path guard — never read these paths (US-1 AC#6)
 # ---------------------------------------------------------------------------
 _FORBIDDEN_PATH_PATTERN = (
-    ".claude/skills/aws-incident-response/references/scenarios/"
+    ".kiro/skills/aws-incident-response/references/scenarios/"
 )
 
 # Parity baseline write guard — harness must never write into this directory.
@@ -178,7 +178,7 @@ class Harness:
         halt_preamble = self.get_agent_preamble(sim_dir)
         sim_dir_posix = sim_dir.as_posix()
         protocol_ref = (
-            ".claude/skills/aws-exam/references/exam-simulation-protocol.md"
+            ".kiro/skills/aws-exam/references/exam-simulation-protocol.md"
         )
         exam_flag_path = (sim_dir / "_exam_mode_flag.yaml").as_posix()
 

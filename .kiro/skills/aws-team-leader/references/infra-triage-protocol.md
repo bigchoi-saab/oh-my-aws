@@ -18,7 +18,7 @@
 
 프로젝트 내 CDK 코드 위치를 파악한다:
 ```bash
-find . -name "cdk.json" -not -path "*/node_modules/*" -not -path "*/_research/*" -not -path "*/cdk-research/*"
+rg --files -g cdk.json -g '!**/node_modules/**' -g '!**/_research/**' -g '!**/cdk-research/**'
 ```
 
 **CDK 프로젝트가 없는 경우**:

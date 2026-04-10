@@ -238,7 +238,7 @@ Additionally, append a note to `.omc/plans/open-questions.md` in the format:
 - **Action**: Human reviewer should classify and either (a) add a new DT row to reflection-protocol.md, or (b) confirm `layer: unclear` and propose a fix manually.
 ```
 
-The reflector MUST NOT edit `.claude/**/*` files. Only append to `.omc/plans/open-questions.md`.
+The reflector MUST NOT edit `.kiro/**/*` files. Only append to `.omc/plans/open-questions.md`.
 
 ---
 
@@ -341,7 +341,7 @@ The reflector MUST:
 - Mark all `dkr:*` proposals with `requires_human_approval: true`.
 
 The reflector MUST NOT:
-- Edit any file under `.claude/` or `.claude/skills/` or `.claude/agents/`.
+- Edit any file under `.kiro/` or `.kiro/skills/` or `.kiro/agents/`.
 - Edit any DKR scenario file directly.
 - Delete or overwrite existing proposal files from prior runs.
 - Apply its own proposals.

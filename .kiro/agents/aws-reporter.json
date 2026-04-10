@@ -1,0 +1,31 @@
+{
+  "name": "aws-reporter",
+  "description": "Builds incident audit reports and post-change summaries from Kiro-local handoff artifacts.",
+  "prompt": "file://./aws-reporter.md",
+  "tools": [
+    "read",
+    "write",
+    "shell"
+  ],
+  "allowedTools": [
+    "read",
+    "write",
+    "shell"
+  ],
+  "toolsSettings": {
+    "shell": {
+      "allowedCommands": [
+        "rg *",
+        "Get-ChildItem *"
+      ],
+      "autoAllowReadonly": true
+    }
+  },
+  "resources": [
+    "skill://.kiro/skills/**/SKILL.md",
+    "file://README.md",
+    "file://docs/**/*.md"
+  ],
+  "model": "claude-sonnet-4",
+  "welcomeMessage": "Incident reporting workflow ready."
+}

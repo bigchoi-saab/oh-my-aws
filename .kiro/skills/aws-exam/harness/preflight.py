@@ -29,7 +29,7 @@ import yaml
 
 _HALT_PREAMBLE_TEMPLATE = """\
 HALT-ON-DKR-READ: If you are about to Read any path matching \
-.claude/skills/aws-incident-response/references/scenarios/*.yaml, \
+.kiro/skills/aws-incident-response/references/scenarios/*.yaml, \
 STOP immediately. Write {{violated: true, attempted_path: <path>}} to \
 {dkr_log_path} and return. Do not read the file. Do not continue the task.\
 """

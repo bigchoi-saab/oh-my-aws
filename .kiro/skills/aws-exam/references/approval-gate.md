@@ -12,7 +12,7 @@
 After Phase 4 Reflect produces `reflection.yaml` with improvement proposals, Phase 6 presents the top-N proposals to the human for review. This document defines:
 - The interactive approval flow (approve / defer / reject / view_details)
 - The `/aws-exam improvements apply` command behavior
-- The hard prohibition on auto-editing `.claude/` files
+- The hard prohibition on auto-editing `.kiro/` files
 
 **Core invariant**: Approval is a status marker, not an auto-edit trigger. The system records that a human approved a proposal; the human must make the actual file edits and commit them manually.
 
@@ -105,7 +105,7 @@ Options:
 
 <!-- HARD CONSTRAINT — AUTO-EDIT FORBIDDEN:
      The approve branch MUST NOT use Write, Edit, or any file-modification tool
-     on any path under .claude/. The only file written by approve is the proposal
+     on any path under .kiro/. The only file written by approve is the proposal
      YAML itself (applying the status: approved + approved_at fields).
      Violation of this constraint corrupts the DKR ground truth and invalidates
      the measurement signal. There are no exceptions. -->
@@ -134,7 +134,7 @@ Options:
 4. Print confirmation and re-prompt.
 
 <!-- HARD CONSTRAINT — AUTO-EDIT FORBIDDEN:
-     The reject branch MUST NOT edit any .claude/ file. The rejection reason
+     The reject branch MUST NOT edit any .kiro/ file. The rejection reason
      is stored only in the proposal file. The DKR, scenarios, agents, and
      skill files are not touched. -->
 
@@ -154,7 +154,7 @@ Exit the approval gate. Remaining proposals retain their current status (`pendin
 
 ### 3.1 Purpose
 
-Allows the human to record, after the fact, that they have made the edit and committed it. This command writes **only apply metadata** to the proposal file. It does NOT edit any `.claude/` file.
+Allows the human to record, after the fact, that they have made the edit and committed it. This command writes **only apply metadata** to the proposal file. It does NOT edit any `.kiro/` file.
 
 ### 3.2 Usage
 
@@ -181,7 +181,7 @@ Allows the human to record, after the fact, that they have made the edit and com
    applied_at: {timestamp}
    applied_commit: {sha or "(not provided)"}
 
-   The proposal file has been updated. No .claude/ files were modified.
+   The proposal file has been updated. No .kiro/ files were modified.
    ```
 5. Update regression tracker entry for this proposal's `proposal_outcome` field to `applied`.
 
@@ -189,13 +189,13 @@ Allows the human to record, after the fact, that they have made the edit and com
      The apply command writes ONLY to the proposal YAML file:
        applied_by, applied_at, applied_commit, status: applied
      It does NOT:
-       - Edit .claude/agents/*.md
-       - Edit .claude/skills/*/references/scenarios/*.yaml  (DKR — inviolable)
-       - Edit .claude/skills/*/references/*.yaml
-       - Edit .claude/skills/*/SKILL.md
+       - Edit .kiro/agents/*.md
+       - Edit .kiro/skills/*/references/scenarios/*.yaml  (DKR — inviolable)
+       - Edit .kiro/skills/*/references/*.yaml
+       - Edit .kiro/skills/*/SKILL.md
        - Edit any file outside .ops/exam-results/
      Violation of this constraint is a critical bug. The human is the only
-     actor permitted to edit .claude/ files. -->
+     actor permitted to edit .kiro/ files. -->
 
 ### 3.4 Idempotency
 
@@ -213,7 +213,7 @@ proposal_id: prop-{run_id}-{question_id}-{sequence}
 run_id: run-2026-04-05T14-30
 question_id: exam-lambda-throttle-001
 failure_layer: knowledge_gap          # knowledge_gap | reasoning_error | priority_error | procedural_error
-target_file: ".claude/skills/aws-incident-response/references/scenarios/lambda-throttle.yaml"
+target_file: ".kiro/skills/aws-incident-response/references/scenarios/lambda-throttle.yaml"
 target_section: "root_causes[0].description"
 summary: "Add missing concurrent execution limit root cause entry"
 detail: |
@@ -270,7 +270,7 @@ APPLIED:
 
 ## 6. Mock Run — Branch Decision Table
 
-| User action | Proposal status before | Writes to | Proposal status after | .claude/ modified? |
+| User action | Proposal status before | Writes to | Proposal status after | .kiro/ modified? |
 |---|---|---|---|---|
 | `approve 1` | pending | proposal YAML + open-questions.md | approved | **NO** |
 | `defer 2` | pending | proposal YAML | deferred | **NO** |
@@ -280,7 +280,7 @@ APPLIED:
 | `/aws-exam improvements apply <id>` | approved | proposal YAML only | applied | **NO** |
 | `/aws-exam improvements apply <id>` | pending/deferred/rejected | none (error) | unchanged | **NO** |
 
-**Every branch: `.claude/` is never modified.** The human makes all edits to `.claude/` files after approval.
+**Every branch: `.kiro/` is never modified.** The human makes all edits to `.kiro/` files after approval.
 
 ---
 
@@ -291,7 +291,7 @@ Task #8 (aws-exam SKILL.md v0.2.0 rewrite) must add Phase 6 to the phase table r
 ```markdown
 ### Phase 6: Human Approval Gate
 
-See: `.claude/skills/aws-exam/references/approval-gate.md`
+See: `.kiro/skills/aws-exam/references/approval-gate.md`
 
 If `--no-approval` flag was passed to `/aws-exam run`, skip this phase.
 

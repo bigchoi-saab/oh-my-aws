@@ -6,7 +6,7 @@ version: "1.0.0"
 # ═══════════════════════════════════════════════════════════════
 # 용도: 시험 문제 전체 목록, 통계, 라우팅 정보 제공
 # 참조: .omc/plans/aws-exam-self-learning-pipeline.md § 단계 1.2
-# 스키마: .claude/skills/aws-incident-response/references/exam-schema.yaml
+# 스키마: .kiro/skills/aws-incident-response/references/exam-schema.yaml
 # ═══════════════════════════════════════════════════════════════
 
 total_questions: 10

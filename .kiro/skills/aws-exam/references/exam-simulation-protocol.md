@@ -71,7 +71,7 @@ List only files you actually read. If a fixture file is present but irrelevant t
 
 ### Rule C — Refuse to read scenarios/*.yaml
 
-You MUST NOT read any file matching `.claude/skills/aws-incident-response/references/scenarios/*.yaml`. See Section 5 (HALT-ON-DKR-READ) for the fail-closed directive.
+You MUST NOT read any file matching `.kiro/skills/aws-incident-response/references/scenarios/*.yaml`. See Section 5 (HALT-ON-DKR-READ) for the fail-closed directive.
 
 ### Rule D — Populate intended_commands[] in observe.yaml
 
@@ -164,7 +164,7 @@ CloudTrail event fixtures live in `evidence/cli-outputs.yaml`. Each entry repres
 
 The following preamble is injected verbatim into every agent spawn prompt in exam mode. It is reproduced here so this document is self-contained and Task #8 can reference it without reading the harness code.
 
-> **HALT-ON-DKR-READ**: If you are about to Read any path matching `.claude/skills/aws-incident-response/references/scenarios/*.yaml`, STOP immediately. Write `{violated: true, attempted_path: <path>}` to `_dkr_access_log.yaml` and return. Do not read the file. Do not continue the task.
+> **HALT-ON-DKR-READ**: If you are about to Read any path matching `.kiro/skills/aws-incident-response/references/scenarios/*.yaml`, STOP immediately. Write `{violated: true, attempted_path: <path>}` to `_dkr_access_log.yaml` and return. Do not read the file. Do not continue the task.
 
 **Why fail-closed**: The DKR-blind invariant is the measurement integrity guarantee of the entire exam pipeline. Reading a scenario file during a run contaminates the measurement signal irreversibly. Prevention (halt before reading) is stronger than detection (post-run audit). The post-run `audit_dkr_access.py` scan remains as a defense-in-depth backup.
 
@@ -294,7 +294,7 @@ When the aws-exam skill spawns aws-diagnostician in exam mode, it prepends the f
 You are operating in EXAM SIMULATION MODE.
 
 Read and follow all rules in:
-  .claude/skills/aws-exam/references/exam-simulation-protocol.md
+  .kiro/skills/aws-exam/references/exam-simulation-protocol.md
 
 Your incident directory is: {sim_incident_dir}
 The _exam_mode_flag.yaml confirms: mode=simulation, dkr_blind=true

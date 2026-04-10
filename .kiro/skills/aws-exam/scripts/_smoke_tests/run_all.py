@@ -158,7 +158,7 @@ def test_audit_dkr_access(tmp: str) -> None:
         os.path.join(run6, "sim-incidents", "q001", "_dkr_access_log.yaml"),
         {
             "violated": True,
-            "attempted_path": ".claude/skills/aws-incident-response/references/scenarios/lambda-timeout.yaml",
+            "attempted_path": ".kiro/skills/aws-incident-response/references/scenarios/lambda-timeout.yaml",
             "agent": "aws-diagnostician",
         },
     )

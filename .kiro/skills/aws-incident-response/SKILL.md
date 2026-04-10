@@ -205,7 +205,7 @@ Phase E (종료):     해결 메시지 → 포스트모템 예약 → 후속 조
 파이프라인 실행은 `aws-team-leader`가 전문 agent(Diagnostician, Executor, Reporter)를 통해 조율한다.
 이 문서는 도메인 지식 참조용이며, 직접 실행 지시를 포함하지 않는다.
 
-파이프라인 구조 및 agent 배정은 `.claude/skills/aws-team-leader/SKILL.md`를 참조.
+파이프라인 구조 및 agent 배정은 `.kiro/skills/aws-team-leader/SKILL.md`를 참조.
 
 ## 11. Reference Documents
 

@@ -34,10 +34,10 @@ aws-exam-skill이 프롬프트로 다음 경로를 전달한다:
 
 | 항목 | 설명 |
 |------|------|
-| 시험 문제 YAML 경로 | `.claude/skills/aws-incident-response/references/exam-bank/{question-file}.yaml` |
+| 시험 문제 YAML 경로 | `.kiro/skills/aws-incident-response/references/exam-bank/{question-file}.yaml` |
 | 응답 YAML 경로 | `exam-submission.yaml` (DKR-blind 응답) |
 | DKR 시나리오 YAML 경로 | 해당 `scenario_id`의 DKR 파일 (정답 근거, ground truth) |
-| grading-rubric.yaml 경로 | `.claude/skills/aws-incident-response/references/grading-rubric.yaml` |
+| grading-rubric.yaml 경로 | `.kiro/skills/aws-incident-response/references/grading-rubric.yaml` |
 | handoff-schemas.yaml 경로 | `exam-result`, `exam-run-summary` 스키마 정의 |
 | 결과 디렉토리 경로 | `.ops/exam-results/run-{timestamp}/results/` (exam-result) + 상위(run-summary) |
 | 회차 ID | `run-{YYYY-MM-DDTHH-MM}` |

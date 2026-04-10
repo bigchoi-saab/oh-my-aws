@@ -1,0 +1,48 @@
+{
+  "name": "aws-diagnostician",
+  "description": "Collects evidence and diagnoses AWS incidents using the Kiro-local incident skill and handoff schemas.",
+  "prompt": "file://./aws-diagnostician.md",
+  "includeMcpJson": true,
+  "tools": [
+    "read",
+    "write",
+    "shell",
+    "@aws-core",
+    "@aws-docs",
+    "@aws-ops-tools"
+  ],
+  "allowedTools": [
+    "read",
+    "write",
+    "@aws-core/describe_*",
+    "@aws-core/list_*",
+    "@aws-core/get_*",
+    "@aws-docs/*",
+    "@aws-ops-tools/query_cloudwatch_logs",
+    "@aws-ops-tools/get_cloudwatch_metrics",
+    "@aws-ops-tools/get_cloudtrail_events",
+    "@aws-ops-tools/describe_aws_health"
+  ],
+  "toolsSettings": {
+    "shell": {
+      "allowedCommands": [
+        "rg *",
+        "Get-ChildItem *",
+        "aws cloudwatch get-metric-statistics *",
+        "aws cloudwatch describe-alarms *",
+        "aws logs start-query *",
+        "aws logs get-query-results *",
+        "aws cloudtrail lookup-events *",
+        "aws health describe-events *"
+      ],
+      "autoAllowReadonly": true
+    }
+  },
+  "resources": [
+    "skill://.kiro/skills/**/SKILL.md",
+    "file://README.md",
+    "file://docs/**/*.md"
+  ],
+  "model": "claude-sonnet-4",
+  "welcomeMessage": "AWS diagnosis workflow ready."
+}

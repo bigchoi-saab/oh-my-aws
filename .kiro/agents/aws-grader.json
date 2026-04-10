@@ -1,0 +1,32 @@
+{
+  "name": "aws-grader",
+  "description": "Grades AWS exam and skill-chain submissions using the Kiro-local rubric and handoff schemas.",
+  "prompt": "file://./aws-grader.md",
+  "tools": [
+    "read",
+    "write",
+    "shell"
+  ],
+  "allowedTools": [
+    "read",
+    "write",
+    "shell"
+  ],
+  "toolsSettings": {
+    "shell": {
+      "allowedCommands": [
+        "rg *",
+        "Get-ChildItem *",
+        "python .kiro/skills/aws-exam/scripts/*"
+      ],
+      "autoAllowReadonly": true
+    }
+  },
+  "resources": [
+    "skill://.kiro/skills/**/SKILL.md",
+    "file://README.md",
+    "file://docs/**/*.md"
+  ],
+  "model": "claude-sonnet-4",
+  "welcomeMessage": "AWS grading workflow ready."
+}

@@ -21,9 +21,9 @@ PRECONDITION (US-0 AC#1):
   .ops/incidents/_parity-baseline/ must contain at minimum:
     - observe.yaml
     - diagnosis.yaml
-  These are produced by the user running one real `/aws-incident` in live mode
+  These are produced by the user running one real aws-team-leader incident flow in live mode
   and copying the resulting artifacts into _parity-baseline/. See:
-    .claude/skills/aws-exam/references/live-incident-bootstrap-guide.md
+    .kiro/skills/aws-exam/references/live-incident-bootstrap-guide.md
 
 DO NOT RUN THIS SCRIPT UNTIL THE BASELINE EXISTS.
 If baseline is absent, this script exits 42 — that is the expected behavior.
@@ -63,7 +63,7 @@ DEFAULT_FIXTURE_DIAG   = os.path.join(
     "sim-incidents", "_us0-parity-fixture", "diagnosis.yaml"
 )
 PARITY_CHECK_SCRIPT    = os.path.join(SCRIPTS_DIR, "parity_check.py")
-BOOTSTRAP_GUIDE        = ".claude/skills/aws-exam/references/live-incident-bootstrap-guide.md"
+BOOTSTRAP_GUIDE        = ".kiro/skills/aws-exam/references/live-incident-bootstrap-guide.md"
 
 EXIT_PASS              = 0
 EXIT_FAIL              = 1

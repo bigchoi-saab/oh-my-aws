@@ -1,0 +1,34 @@
+{
+  "name": "aws-infra-analyzer",
+  "description": "Analyzes AWS CDK infrastructure requests using the Kiro-local infra skill and handoff schemas.",
+  "prompt": "file://./aws-infra-analyzer.md",
+  "includeMcpJson": true,
+  "tools": [
+    "read",
+    "write",
+    "shell",
+    "@aws-docs"
+  ],
+  "allowedTools": [
+    "read",
+    "write",
+    "shell",
+    "@aws-docs/*"
+  ],
+  "toolsSettings": {
+    "shell": {
+      "allowedCommands": [
+        "rg *",
+        "Get-ChildItem *"
+      ],
+      "autoAllowReadonly": true
+    }
+  },
+  "resources": [
+    "skill://.kiro/skills/**/SKILL.md",
+    "file://README.md",
+    "file://docs/**/*.md"
+  ],
+  "model": "claude-sonnet-4",
+  "welcomeMessage": "CDK infrastructure analysis ready."
+}

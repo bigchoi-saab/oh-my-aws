@@ -1,6 +1,7 @@
 {
   "name": "aws-incident-responder",
   "description": "AWS 인프라 인시던트 감지, 분석, 대응 전문 에이전트. Observe-Reason-Act-Verify-Audit 파이프라인으로 장애 초동 조치를 수행합니다.",
+  "prompt": "file://./aws-incident-responder.md",
   "model": "claude-sonnet-4",
 
   "mcpServers": {
@@ -86,6 +87,8 @@
   },
 
   "resources": [
-    "skill://.kiro/skills/**/SKILL.md"
+    "skill://.kiro/skills/**/SKILL.md",
+    "file://README.md",
+    "file://docs/**/*.md"
   ]
 }

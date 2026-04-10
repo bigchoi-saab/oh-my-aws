@@ -1,0 +1,42 @@
+{
+  "name": "aws-executor",
+  "description": "Executes approved AWS mitigation steps and verification checks using Kiro-local guardrails.",
+  "prompt": "file://./aws-executor.md",
+  "includeMcpJson": true,
+  "tools": [
+    "read",
+    "write",
+    "shell",
+    "@aws-core",
+    "@aws-docs",
+    "@aws-ops-tools"
+  ],
+  "allowedTools": [
+    "read",
+    "write",
+    "@aws-docs/*",
+    "@aws-ops-tools/dry_run_remediation",
+    "@aws-ops-tools/check_metric_recovery",
+    "@aws-ops-tools/validate_stability_window"
+  ],
+  "toolsSettings": {
+    "shell": {
+      "allowedCommands": [
+        "rg *",
+        "Get-ChildItem *",
+        "aws cloudwatch get-metric-statistics *",
+        "aws cloudwatch describe-alarms *",
+        "aws logs start-query *",
+        "aws logs get-query-results *"
+      ],
+      "autoAllowReadonly": true
+    }
+  },
+  "resources": [
+    "skill://.kiro/skills/**/SKILL.md",
+    "file://README.md",
+    "file://docs/**/*.md"
+  ],
+  "model": "claude-sonnet-4",
+  "welcomeMessage": "AWS execution and verification workflow ready."
+}
